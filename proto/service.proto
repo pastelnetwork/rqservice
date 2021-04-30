@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package rqservice;
+
+service raptorq {
+  rpc EncoderInfo(UploadDataRequest) returns(EncoderInfoReply);
+  rpc Encode(UploadDataRequest) returns(stream SymbolReply);
+  rpc Decode(UploadSymbolsRequest) returns(DownloadDataReply);
+}
+
+message UploadDataRequest {
+  bytes data = 1;
+}
+
+message EncoderInfoReply {
+  repeated string name = 1;
+  EncoderParameters encoder_params = 2;
+}
+
+message EncoderParameters {
+  uint64 transfer_length = 1;   //u64
+  uint32 symbol_size = 2;       //u16
+  uint32 num_source_blocks = 3; //u8
+  uint32 num_sub_blocks = 4;    //u16
+  uint32 symbol_alignment = 5;  //u8
+}
+
+message SymbolReply {
+  bytes symbol = 1;
+}
+
+message UploadSymbolsRequest {
+  oneof params_or_symbols_oneof {
+    EncoderParameters encoder_params = 1;
+    bytes symbol = 2;
+  }
+}
+
+message DownloadDataReply {
+  bytes data = 1;
+}

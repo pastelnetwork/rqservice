@@ -1,0 +1,19 @@
+[package]
+name = "rq-service"
+version = "0.1.0"
+authors = ["ayk"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+raptorq = "1.6.3"
+base64-url = "1.4.10"
+structopt = "0.3"
+config = "0.11.0"
+serde_derive = "1.0.125"
+serde = "^1.0.8"
+
+[build-dependencies]
+# protobuf->Rust compiler
+tonic-build = "0.4.2"
