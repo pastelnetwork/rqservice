@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package rqservice;
 
-service raptorq {
+service RQService {
   rpc EncoderInfo(UploadDataRequest) returns(EncoderInfoReply);
   rpc Encode(UploadDataRequest) returns(stream SymbolReply);
   rpc Decode(UploadSymbolsRequest) returns(DownloadDataReply);

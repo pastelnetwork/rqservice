@@ -7,12 +7,21 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-raptorq = "1.6.3"
-base64-url = "1.4.10"
-structopt = "0.3"
+# Config
+clap = "2.33.3"
 config = "0.11.0"
+dirs = "3.0.2"
 serde_derive = "1.0.125"
 serde = "^1.0.8"
+# gRPC server/client
+tonic = "0.4.3"
+prost = "0.7.0"
+#Async
+tokio = {version = "1.5.0", features = ["full"]}
+tokio-stream ="0.1.5"
+# raptorQ
+raptorq = "1.6.3"
+base64-url = "1.4.10"
 
 [build-dependencies]
 # protobuf->Rust compiler
