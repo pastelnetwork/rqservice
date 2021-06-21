@@ -1,3 +1,7 @@
+# Copyright (c) 2021-2021 The Pastel Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 [package]
 name = "rq-service"
 version = "0.1.0"
@@ -13,6 +17,8 @@ config = "0.11.0"
 dirs = "3.0.2"
 serde_derive = "1.0.125"
 serde = "^1.0.8"
+flexi_logger = { version = "0.18", features = ["async"] }
+log = "0.4"
 # gRPC server/client
 tonic = "0.4.3"
 prost = "0.7.0"

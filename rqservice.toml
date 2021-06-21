@@ -1,6 +1,0 @@
-global_string = "test"
-global_integer = 5
-
-[service]
-ip = "127.0.0.1"
-port = 50051
