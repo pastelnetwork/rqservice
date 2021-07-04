@@ -2,7 +2,6 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-
 use crate::app::ServiceSettings;
 
 use tokio::sync::mpsc;
@@ -16,6 +15,9 @@ use rq::raptor_q_server::{RaptorQ, RaptorQServer};
 use rq::{UploadDataRequest, EncoderInfoReply, EncoderParameters, SymbolReply, UploadSymbolsRequest, DownloadDataReply};
 use tokio_stream::StreamExt;
 
+use crate::encoder;
+use crate::encoder::encode;
+
 #[derive(Debug, Default)]
 pub struct RaptorQService;
 
@@ -24,16 +26,17 @@ impl RaptorQ for RaptorQService {
     async fn encoder_info(&self, request: Request<UploadDataRequest>) -> Result<Response<EncoderInfoReply>, Status> {
         log::info!("Got a 'encoder_info' request: {:?}", request);
 
-        // let req = request.into_inner();
-        // let a = req.data;
+        let req = request.into_inner();
 
-        let names = vec![String::from("1"), String::from("2"), String::from("3"), String::from("4"), String::from("5")];
+        let rq_reply = encoder::encode(&req.data);
+
+        let names : Vec<String> = rq_reply.symbols.into_iter().map(
+            |symbol| encoder::symbol_id(symbol)
+        ).collect();
+
         let encoder_params = rq::EncoderParameters {
-            transfer_length: 100,
-            symbol_size: 10,
-            num_source_blocks: 1,
-            num_sub_blocks: 1,
-            symbol_alignment: 0,
+            coti: rq_reply.coti,
+            ssoti: rq_reply.ssoti
         };
 
         let reply = rq::EncoderInfoReply { name: names, encoder_params: Some(encoder_params) };
@@ -49,17 +52,17 @@ impl RaptorQ for RaptorQService {
         // creating a queue or channel
         let (tx, rx) = mpsc::channel(10); //buffer is 10 messages
 
-        // let req = request.into_inner();
-        // let a = req.data;
+        let req = request.into_inner();
 
         // creating a new task
         tokio::spawn(async move {
             // looping and sending our response using stream
-            for i in 0..4 {
+            let rq_reply = encoder::encode(&req.data);
+
+            for symbol in rq_reply.symbols {
                 // sending response to our channel
-                let v = vec![i];
-                if let Err(e) = tx.send(Ok(SymbolReply {symbol: v,})).await {
-                    //log error and continue
+                if let Err(e) = tx.send(Ok(SymbolReply {symbol: symbol.serialize(),})).await {
+                    log::error!("Error streaming symbol {}", e)
                 }
             }
         });

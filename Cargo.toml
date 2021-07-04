@@ -19,16 +19,22 @@ serde_derive = "1.0.125"
 serde = "^1.0.8"
 flexi_logger = { version = "0.18", features = ["async"] }
 log = "0.4"
+
 # gRPC server/client
 tonic = "0.4.3"
 prost = "0.7.0"
+
 #Async
 tokio = {version = "1.5.0", features = ["full"]}
 tokio-stream ="0.1.5"
+
 # raptorQ
 raptorq = "1.6.3"
 base64-url = "1.4.10"
 
+# other
+base64 = "0.13.0"
+sha3 = "0.9.1"
+
 [build-dependencies]
-# protobuf->Rust compiler
 tonic-build = "0.4.2"

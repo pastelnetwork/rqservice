@@ -2,13 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-use std::error::Error;
 use flexi_logger::{Logger, FileSpec, WriteMode};
-use std::net::Shutdown::Write;
 
-// pub mod rq;
 pub mod app;
 pub mod rqserver;
+pub mod encoder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,16 +26,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // println!("{}", settings.grpc_service);
 
     rqserver::start_server(&settings).await?;
-
-    //
-    // match settings.cmd.subcommand {
-    //     cmd::SubCommand::StartService(_opts) => {
-    //         println!("Start the service on: {:?}:{:?}", settings.cfg.service.ip, settings.cfg.service.port);
-    //     }
-    //     cmd::SubCommand::Command(opts) => {
-    //         println!("Run command: '{:?}'", opts.command);
-    //     }
-    // }
 
     Ok(())
 }
