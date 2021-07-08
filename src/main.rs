@@ -6,7 +6,7 @@ use flexi_logger::{Logger, FileSpec, WriteMode};
 
 pub mod app;
 pub mod rqserver;
-pub mod encoder;
+pub mod rqprocessor;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,9 +21,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .append()
         .write_mode(WriteMode::Async)
         .start()?;
-
-    log::info!("{}", &settings.grpc_service);
-    // println!("{}", settings.grpc_service);
 
     rqserver::start_server(&settings).await?;
 

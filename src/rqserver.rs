@@ -15,11 +15,13 @@ use rq::raptor_q_server::{RaptorQ, RaptorQServer};
 use rq::{UploadDataRequest, EncoderInfoReply, EncoderParameters, SymbolReply, UploadSymbolsRequest, DownloadDataReply};
 use tokio_stream::StreamExt;
 
-use crate::encoder;
-use crate::encoder::encode;
+use crate::rqprocessor;
+use crate::rqprocessor::*;
 
 #[derive(Debug, Default)]
-pub struct RaptorQService;
+pub struct RaptorQService {
+    pub settings: ServiceSettings,
+}
 
 #[tonic::async_trait]
 impl RaptorQ for RaptorQService {
@@ -28,15 +30,15 @@ impl RaptorQ for RaptorQService {
 
         let req = request.into_inner();
 
-        let rq_reply = encoder::encode(&req.data);
+        let rq_encoder = rqprocessor::RaptorQProcessor::new(
+            self.settings.symbol_size,
+            self.settings.symbols_per_block,
+            self.settings.redundancy_factor);
+        let (names, oti) = rq_encoder.get_names(&req.data);
 
-        let names : Vec<String> = rq_reply.symbols.into_iter().map(
-            |symbol| encoder::symbol_id(symbol)
-        ).collect();
-
-        let encoder_params = rq::EncoderParameters {
-            coti: rq_reply.coti,
-            ssoti: rq_reply.ssoti
+        let encoder_params = rq::EncoderParameters{
+            coti: oti.coti,
+            ssoti: oti.ssoti
         };
 
         let reply = rq::EncoderInfoReply { name: names, encoder_params: Some(encoder_params) };
@@ -54,14 +56,18 @@ impl RaptorQ for RaptorQService {
 
         let req = request.into_inner();
 
+        let rq_encoder = rqprocessor::RaptorQProcessor::new(
+            self.settings.symbol_size,
+            self.settings.symbols_per_block,
+            self.settings.redundancy_factor);
+        let (symbols, _) = rq_encoder.get_packets(&req.data);
+
         // creating a new task
         tokio::spawn(async move {
             // looping and sending our response using stream
-            let rq_reply = encoder::encode(&req.data);
-
-            for symbol in rq_reply.symbols {
+            for symbol in symbols {
                 // sending response to our channel
-                if let Err(e) = tx.send(Ok(SymbolReply {symbol: symbol.serialize(),})).await {
+                if let Err(e) = tx.send(Ok(SymbolReply { symbol, })).await {
                     log::error!("Error streaming symbol {}", e)
                 }
             }
@@ -97,9 +103,9 @@ pub async fn start_server(settings: &ServiceSettings) -> Result<(), Box<dyn std:
 
     let addr = settings.grpc_service.parse().unwrap();
 
-    log::info!("RemoteCliServer listening on {}", addr);
+    log::info!("RaptorQ gRPC Server listening on {}", addr);
 
-    let raptorq_service = RaptorQService::default();
+    let raptorq_service = RaptorQService{settings: settings.clone()};
     let srv = RaptorQServer::new(raptorq_service);
 
     Server::builder().add_service(srv).serve(addr).await?;
