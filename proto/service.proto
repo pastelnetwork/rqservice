@@ -49,8 +49,7 @@ message EncoderInfoReply {
 }
 
 message EncoderParameters {
-  uint64 coti = 1;   //u64
-  uint32 ssoti = 2;  //u32
+  bytes oti = 1;   //12 bytes
 }
 
 message SymbolReply {

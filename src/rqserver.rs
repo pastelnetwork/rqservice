@@ -12,11 +12,10 @@ pub mod rq {
     tonic::include_proto!("raptorq");
 }
 use rq::raptor_q_server::{RaptorQ, RaptorQServer};
-use rq::{UploadDataRequest, EncoderInfoReply, EncoderParameters, SymbolReply, UploadSymbolsRequest, DownloadDataReply};
+use rq::{UploadDataRequest, EncoderInfoReply, /*EncoderParameters,*/ SymbolReply, UploadSymbolsRequest, DownloadDataReply};
 use tokio_stream::StreamExt;
 
 use crate::rqprocessor;
-use crate::rqprocessor::*;
 
 #[derive(Debug, Default)]
 pub struct RaptorQService {
@@ -30,16 +29,14 @@ impl RaptorQ for RaptorQService {
 
         let req = request.into_inner();
 
-        let rq_encoder = rqprocessor::RaptorQProcessor::new(
+        let rq_encoder = rqprocessor::RaptorQEncoder::new(
             self.settings.symbol_size,
             self.settings.symbols_per_block,
-            self.settings.redundancy_factor);
-        let (names, oti) = rq_encoder.get_names(&req.data);
+            self.settings.redundancy_factor,
+            &req.data);
+        let names = rq_encoder.get_names();
 
-        let encoder_params = rq::EncoderParameters{
-            coti: oti.coti,
-            ssoti: oti.ssoti
-        };
+        let encoder_params = rq::EncoderParameters{oti: rq_encoder.serialized_encoder_info().to_vec()};
 
         let reply = rq::EncoderInfoReply { name: names, encoder_params: Some(encoder_params) };
 
@@ -56,11 +53,12 @@ impl RaptorQ for RaptorQService {
 
         let req = request.into_inner();
 
-        let rq_encoder = rqprocessor::RaptorQProcessor::new(
+        let rq_encoder = rqprocessor::RaptorQEncoder::new(
             self.settings.symbol_size,
             self.settings.symbols_per_block,
-            self.settings.redundancy_factor);
-        let (symbols, _) = rq_encoder.get_packets(&req.data);
+            self.settings.redundancy_factor,
+            &req.data);
+        let symbols = rq_encoder.get_packets();
 
         // creating a new task
         tokio::spawn(async move {
@@ -84,10 +82,10 @@ impl RaptorQ for RaptorQService {
             log::info!("Message: {:?}", msg);
             if let Ok(m) = msg {
                 match m.params_or_symbols_oneof {
-                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::EncoderParams(e)) => {
+                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::EncoderParams(_e)) => {
                         log::info!("Get Encoder Parameters")
                     },
-                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::Symbol(s)) => {
+                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::Symbol(_s)) => {
                         log::info!("Get Symbol")
                     },
                     None => ()
