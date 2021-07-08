@@ -16,7 +16,6 @@ const DEFAULT_CONFIG_FILE: &str = "rqservice";
 pub struct ServiceSettings {
     pub grpc_service: String,
     pub symbol_size: u16,
-    pub symbols_per_block: u8,
     pub redundancy_factor: u8,
     pub pastel_path: String,
     pub config_path: String
@@ -52,13 +51,11 @@ impl ServiceSettings {
 
         let grpc_service = ServiceSettings::find_setting(&cmd_args, &cfg, "grpc-service", "".to_string(), true);
         let symbol_size = ServiceSettings::find_setting(&cmd_args, &cfg, "symbol-size", "50000".to_string(), false).parse::<u16>().unwrap();
-        let symbols_per_block= ServiceSettings::find_setting(&cmd_args, &cfg, "symbols-per-block", "40".to_string(), false).parse::<u8>().unwrap();
         let redundancy_factor = ServiceSettings::find_setting(&cmd_args, &cfg, "redundancy-factor", "12".to_string(), false).parse::<u8>().unwrap();
 
         Ok(ServiceSettings{
             grpc_service,
             symbol_size,
-            symbols_per_block,
             redundancy_factor,
             pastel_path,
             config_path})
@@ -143,9 +140,6 @@ mod tests {
         let symbol_size = ServiceSettings::find_setting(&cmd_args, &cfg, "symbol-size", "10".to_string(), false).parse::<u16>().unwrap();
         assert_eq!(symbol_size, 50000);
 
-        let symbols_per_block= ServiceSettings::find_setting(&cmd_args, &cfg, "symbols-per-block", "20".to_string(), false).parse::<u8>().unwrap();
-        assert_eq!(symbols_per_block, 40);
-
         let redundancy_factor = ServiceSettings::find_setting(&cmd_args, &cfg, "redundancy-factor", "1".to_string(), false).parse::<u8>().unwrap();
         assert_eq!(redundancy_factor, 12);
     }
@@ -179,9 +173,6 @@ mod tests {
 
         let symbol_size = ServiceSettings::find_setting(&cmd_args, &cfg, "symbol-size", "10".to_string(), false).parse::<u16>().unwrap();
         assert_eq!(symbol_size, 10);
-
-        let symbols_per_block= ServiceSettings::find_setting(&cmd_args, &cfg, "symbols-per-block", "20".to_string(), false).parse::<u8>().unwrap();
-        assert_eq!(symbols_per_block, 20);
 
         let redundancy_factor = ServiceSettings::find_setting(&cmd_args, &cfg, "redundancy-factor", "1".to_string(), false).parse::<u8>().unwrap();
         assert_eq!(redundancy_factor, 1);

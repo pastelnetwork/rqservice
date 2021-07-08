@@ -31,12 +31,11 @@ impl RaptorQ for RaptorQService {
 
         let rq_encoder = rqprocessor::RaptorQEncoder::new(
             self.settings.symbol_size,
-            self.settings.symbols_per_block,
             self.settings.redundancy_factor,
             &req.data);
         let names = rq_encoder.get_names();
 
-        let encoder_params = rq::EncoderParameters{oti: rq_encoder.serialized_encoder_info().to_vec()};
+        let encoder_params = rq::EncoderParameters{oti: rq_encoder.serialized_encoder_info()};
 
         let reply = rq::EncoderInfoReply { name: names, encoder_params: Some(encoder_params) };
 
@@ -55,7 +54,6 @@ impl RaptorQ for RaptorQService {
 
         let rq_encoder = rqprocessor::RaptorQEncoder::new(
             self.settings.symbol_size,
-            self.settings.symbols_per_block,
             self.settings.redundancy_factor,
             &req.data);
         let symbols = rq_encoder.get_packets();
@@ -78,22 +76,35 @@ impl RaptorQ for RaptorQService {
 
         let mut stream = request.into_inner();
 
+        let mut rq_decoder: Option<rqprocessor::RaptorQDecoder> = None;
+        let mut data = Vec::new();
+
         while let Some(msg) = stream.next().await {
             log::info!("Message: {:?}", msg);
             if let Ok(m) = msg {
                 match m.params_or_symbols_oneof {
-                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::EncoderParams(_e)) => {
-                        log::info!("Get Encoder Parameters")
+                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::EncoderParams(e)) => {
+                        log::info!("Get Encoder Parameters");
+                        if e.oti.len() != 12 {
+                            log::error!("Wrong size of EncoderParams {:?}", e)
+                        }
+                        rq_decoder = Some(rqprocessor::RaptorQDecoder::new(e.oti));
                     },
-                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::Symbol(_s)) => {
-                        log::info!("Get Symbol")
+                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::Symbol(s)) => {
+                        log::info!("Get Symbol");
+                        if let Some(ref mut dec) = rq_decoder {
+                            match dec.decode(&s) {
+                                Some(block) =>  data.extend(block),
+                                None => {}
+                            }
+                        }
                     },
                     None => ()
                 }
             }
         }
 
-        Ok(Response::new(rq::DownloadDataReply { data: Vec::new()}))
+        Ok(Response::new(rq::DownloadDataReply { data }))
     }
 }
 

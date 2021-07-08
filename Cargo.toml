@@ -36,6 +36,7 @@ base64-url = "1.4.10"
 base64 = "0.13.0"
 sha3 = "0.9.1"
 rand = "0.8.4"
+itertools = "0.10.1"
 
 [build-dependencies]
 tonic-build = "0.4.2"

@@ -1,4 +1,3 @@
 grpc-service = "127.0.0.1:50051"
 symbol-size = 50000
-symbols-per-block = 40
 redundancy-factor = 12
