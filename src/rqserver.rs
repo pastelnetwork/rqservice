@@ -12,7 +12,7 @@ pub mod rq {
     tonic::include_proto!("raptorq");
 }
 use rq::raptor_q_server::{RaptorQ, RaptorQServer};
-use rq::{UploadDataRequest, EncoderInfoReply, /*EncoderParameters,*/ SymbolReply, UploadSymbolsRequest, DownloadDataReply};
+use rq::{EncodeMetaDataRequest, EncodeMetaDataReply, EncodeRequest, EncodeReply, DecodeRequest, DecodeReply};
 use tokio_stream::StreamExt;
 
 use crate::rqprocessor;
@@ -24,87 +24,60 @@ pub struct RaptorQService {
 
 #[tonic::async_trait]
 impl RaptorQ for RaptorQService {
-    async fn encoder_info(&self, request: Request<UploadDataRequest>) -> Result<Response<EncoderInfoReply>, Status> {
+    async fn encode_meta_data(&self, request: Request<EncodeMetaDataRequest>) -> Result<Response<EncodeMetaDataReply>, Status> {
         log::info!("Got a 'encoder_info' request: {:?}", request);
 
         let req = request.into_inner();
 
-        let rq_encoder = rqprocessor::RaptorQEncoder::new(
+        let processor = rqprocessor::RaptorQProcessor::new(
             self.settings.symbol_size,
-            self.settings.redundancy_factor,
-            &req.data);
-        let names = rq_encoder.get_names();
+            self.settings.redundancy_factor);
 
-        let encoder_params = rq::EncoderParameters{oti: rq_encoder.serialized_encoder_info()};
+        match processor.create_metadata(req.path, req.files_number, req.block_hash, req.pastel_id) {
+            Some(meta) => {
 
-        let reply = rq::EncoderInfoReply { name: names, encoder_params: Some(encoder_params) };
+                let reply = rq::EncodeMetaDataReply {
+                    encoder_parameters: meta.encoder_parameters,
+                    path: meta.path,
+                    symbol_names: meta.symbol_names };
+
+                Ok(Response::new(reply))
+            },
+            None => {
+                Err(Status::internal("Internal error"))
+            }
+        }
+    }
+
+    async fn encode(&self, request: Request<EncodeRequest>) -> Result<Response<EncodeReply>, Status> {
+        log::info!("Got a 'encode' request: {:?}", request);
+
+        // // creating a queue or channel
+        // let (tx, rx) = mpsc::channel(10); //buffer is 10 messages
+        //
+        // let req = request.into_inner();
+        //
+        // let rq_encoder = rqprocessor::RaptorQEncoder::new(
+        //     self.settings.symbol_size,
+        //     self.settings.redundancy_factor,
+        //     &req.data);
+        // let symbols = rq_encoder.get_packets();
+
+
+        let reply = rq::EncodeReply { path: String::new() };
 
         Ok(Response::new(reply))
     }
-
-    type EncodeStream=ReceiverStream<Result<SymbolReply, Status>>;
-
-    async fn encode(&self, request: Request<UploadDataRequest>) -> Result<Response<Self::EncodeStream>, Status> {
-        log::info!("Got a 'encode' request: {:?}", request);
-
-        // creating a queue or channel
-        let (tx, rx) = mpsc::channel(10); //buffer is 10 messages
-
-        let req = request.into_inner();
-
-        let rq_encoder = rqprocessor::RaptorQEncoder::new(
-            self.settings.symbol_size,
-            self.settings.redundancy_factor,
-            &req.data);
-        let symbols = rq_encoder.get_packets();
-
-        // creating a new task
-        tokio::spawn(async move {
-            // looping and sending our response using stream
-            for symbol in symbols {
-                // sending response to our channel
-                if let Err(e) = tx.send(Ok(SymbolReply { symbol, })).await {
-                    log::error!("Error streaming symbol {}", e)
-                }
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
-    async fn decode(&self, request: Request<tonic::Streaming<UploadSymbolsRequest>>) -> Result<Response<DownloadDataReply>, Status> {
+    async fn decode(&self, request: Request<DecodeRequest>) -> Result<Response<DecodeReply>, Status> {
         log::info!("Got a 'decode' request: {:?}", request);
 
-        let mut stream = request.into_inner();
+        // let mut stream = request.into_inner();
+        //
+        // let mut rq_decoder: Option<rqprocessor::RaptorQDecoder> = None;
 
-        let mut rq_decoder: Option<rqprocessor::RaptorQDecoder> = None;
-        let mut data = Vec::new();
+        let reply = rq::DecodeReply { path: String::new() };
 
-        while let Some(msg) = stream.next().await {
-            log::info!("Message: {:?}", msg);
-            if let Ok(m) = msg {
-                match m.params_or_symbols_oneof {
-                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::EncoderParams(e)) => {
-                        log::info!("Get Encoder Parameters");
-                        if e.oti.len() != 12 {
-                            log::error!("Wrong size of EncoderParams {:?}", e)
-                        }
-                        rq_decoder = Some(rqprocessor::RaptorQDecoder::new(e.oti));
-                    },
-                    Some(rq::upload_symbols_request::ParamsOrSymbolsOneof::Symbol(s)) => {
-                        log::info!("Get Symbol");
-                        if let Some(ref mut dec) = rq_decoder {
-                            match dec.decode(&s) {
-                                Some(block) =>  data.extend(block),
-                                None => {}
-                            }
-                        }
-                    },
-                    None => ()
-                }
-            }
-        }
-
-        Ok(Response::new(rq::DownloadDataReply { data }))
+        Ok(Response::new(reply))
     }
 }
 

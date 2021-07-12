@@ -6,14 +6,19 @@ use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use sha3::{Digest, Sha3_256};
 use base64;
 use itertools::Itertools;
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
-pub struct RaptorQEncoder {
-
+pub struct RaptorQProcessor {
     symbol_size: u16,
     redundancy_factor: u8,
-    repair_symbols: u32,
-    enc: Encoder,
+}
+
+#[derive(Debug, Clone)]
+pub struct EncoderMetaData {
+    pub encoder_parameters: Vec<u8>,
+    pub path: String,
+    pub symbol_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,137 +27,160 @@ pub struct RaptorQDecoder {
     dec: Decoder,
 }
 
-impl RaptorQEncoder {
+impl RaptorQProcessor {
 
-    pub fn new(symbol_size: u16, redundancy_factor: u8, data: &Vec<u8>) -> Self {
-        let repair_symbols = (dbg!(data.len()) as u32) *
-            (u32::from(redundancy_factor)-1) /
-                u32::from(symbol_size);
+    pub fn new(symbol_size: u16, redundancy_factor: u8) -> Self {
 
-        let config = ObjectTransmissionInformation::with_defaults(
-            data.len() as u64,
-            symbol_size,
-        );
-
-        RaptorQEncoder {
+        RaptorQProcessor {
             symbol_size,
             redundancy_factor,
-            repair_symbols,
-            enc: Encoder::new(data, config)
         }
     }
 
-    pub fn get_names(&self) -> Vec<String> {
+    pub fn create_metadata(&self,
+                           path: String, files_number: u32,
+                           block_hash: String, pastel_id: String ) -> Option<EncoderMetaData> {
 
-        self.enc.get_encoded_packets(self.repair_symbols)
+        let len = 0;
+        let data= Vec::new();
+
+        let config = ObjectTransmissionInformation::with_defaults(
+            len as u64,
+            self.symbol_size,
+        );
+        let enc = Encoder::new(&data, config);
+
+        let oti = enc.get_config().serialize().to_vec();
+        let repair_symbols = RaptorQProcessor::repair_symbols_num(self.symbol_size,
+                                                                  self.redundancy_factor,
+                                                                  len);
+        let names = enc.get_encoded_packets(repair_symbols)
             .iter()
-            .map( |packet|
+            .map(|packet|
                 {
                     let mut hasher = Sha3_256::new();
                     hasher.update(packet.serialize());
                     base64::encode(hasher.finalize())
                 }
-            ).collect()
+            ).collect();
+
+        Some(EncoderMetaData {
+                encoder_parameters: oti,
+                path: String::new(),
+                symbol_names: names
+            }
+        )
     }
 
-    pub fn get_packets(&self) -> Vec<Vec<u8>> {
+    // pub fn encode(&self) -> String {
+    //
+    //     let get_symbols = Instant::now();
+    //     let symbols = self.enc.get_encoded_packets(self.repair_symbols);
+    //     println!("{:?} spent to create symbols", get_symbols.elapsed());
+    //
+    //     symbols.iter()
+    //         .map( |packet|
+    //             {
+    //                 packet.serialize()
+    //             }
+    //         )
+    //         .collect()
+    // }
+    //
+    // pub fn decode(&mut self, symbol: &Vec<u8>) -> String {
+    //
+    //     let mut cfg = [0u8; 12];
+    //     cfg.iter_mut().set_from(enc_info.iter().cloned());
+    //
+    //     let config = ObjectTransmissionInformation::deserialize(&cfg);
+    //
+    //     RaptorQDecoder {
+    //         dec: Decoder::new(config)
+    //     }
+    //
+    //     self.dec.decode(EncodingPacket::deserialize(&symbol))
+    // }
 
-        self.enc.get_encoded_packets(self.repair_symbols)
-            .iter()
-            .map( |packet|
-                {
-                    packet.serialize()
-                }
-            )
-            .collect()
-    }
-
-    pub fn serialized_encoder_info(&self) -> Vec<u8> {
-        self.enc.get_config().serialize().to_vec()
-    }
-
-    pub fn encoder_info(&self) -> ObjectTransmissionInformation {
-        self.enc.get_config()
-    }
-}
-
-impl RaptorQDecoder {
-    pub fn new(enc_info: Vec<u8>) -> Self {
-
-        let mut cfg = [0u8; 12];
-        cfg.iter_mut().set_from(enc_info.iter().cloned());
-
-        let config = ObjectTransmissionInformation::deserialize(&cfg);
-
-        RaptorQDecoder {
-            dec: Decoder::new(config)
+    pub fn repair_symbols_num(symbol_size: u16, redundancy_factor: u8, data_len: usize) -> u32 {
+        if data_len <= symbol_size as usize {
+            redundancy_factor as u32
+        } else {
+            (data_len as f32 *
+                (f32::from(redundancy_factor) - 1.0) /
+                f32::from(symbol_size)).ceil() as u32
         }
     }
-
-    pub fn decode(&mut self, symbol: &Vec<u8>) -> Option<Vec<u8>> {
-
-        self.dec.decode(EncodingPacket::deserialize(&symbol))
-    }
+    //
+    // pub fn encoder_info(&self) -> ObjectTransmissionInformation {
+    //     self.enc.get_config()
+    // }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // use rand::seq::SliceRandom;
-    use rand::Rng;
     use std::time::Instant;
+    use rand::seq::SliceRandom;
+    use rand::Rng;
 
-    fn simple_test(v_size: usize) {
-        let make_array = Instant::now();
-        let mut vec : Vec<u8> = vec![0; v_size];
-        for i in 0..vec.len() {
-            vec[i] = rand::thread_rng().gen();
-        }
-        println!("{:?} spent to create array", make_array.elapsed());
+    fn encode_decode(v_size: usize) {
+        println!("Testing {} bytes array", v_size);
 
-        let enc = RaptorQEncoder::new(50000, 12, &vec);
-
-        let start = Instant::now();
-
-        let symbols = enc.get_packets();
-
-        println!("{:?} spent to create symbols' names", start.elapsed());
-
-        let tr_length = dbg!(enc.encoder_info()).transfer_length();
-        println!("symbols {}", symbols.len());
-
-        assert_eq!(tr_length as usize, v_size);
-        // assert_eq!(names.len(), );
-
-        let mut data = vec![];
-        let mut dec = RaptorQDecoder::new(enc.serialized_encoder_info());
-        for s in symbols {
-            match dec.decode(&s) {
-                Some(done) =>  {data = done; break;},
-                None => {}
-            }
-        }
-        println!("data {}", data.len());
-
+        // let make_array = Instant::now();
+        //     let mut vec : Vec<u8> = vec![0; v_size];
+        //     for i in 0..vec.len() {
+        //         vec[i] = rand::thread_rng().gen();
+        //     }
+        // println!("{:?} spent to create array", make_array.elapsed());
+        //
+        // let encode_time = Instant::now();
+        //     let enc = RaptorQEncoder::new(10240, 12, &vec);
+        //     let mut symbols = enc.get_packets();
+        // println!("{:?} spent to create symbols", encode_time.elapsed());
+        //
+        // let symbols_count = symbols.len();
+        // symbols.shuffle(&mut rand::thread_rng());
+        //
+        // let decode_time = Instant::now();
+        //     let mut data = vec![];
+        //     let mut dec = RaptorQDecoder::new(enc.serialized_encoder_info());
+        //     for s in symbols {
+        //         if let Some(result) = dec.decode(&s) {
+        //             data = result;
+        //             break;
+        //         }
+        //     }
+        // println!("{:?} spent to restore original data", decode_time.elapsed());
+        //
+        // let source_symbols = (v_size as f64 / 50_000.0f64).ceil() as u32;
+        // let restore_symbols = RaptorQEncoder::repair_symbols_num(50_000, 12, v_size);
+        // println!("original data size = {}; \
+        //             all symbols = {}; (source symbols = {}; \
+        //             restore symbols = {}) restored data size = {}",
+        //          v_size,
+        //          symbols_count,
+        //          source_symbols,
+        //          restore_symbols,
+        //          data.len());
+        //
+        // assert_eq!(enc.encoder_info().transfer_length() as usize, v_size);
+        // assert_eq!(data.len(), v_size);
+        //
+        // assert_eq!(symbols_count, (source_symbols+restore_symbols) as usize);
     }
 
     #[test]
-    fn encode_data_10_000_s() {
-        simple_test(10_000);
+    fn rq_test_10_000_s() {
+        encode_decode(10_000);
     }
 
     #[test]
-    fn encode_data_10_000_000_s() {
-        simple_test(10_000_000);
+    fn rq_test_10_000_000_s() {
+        encode_decode(10_000_000);
     }
 
     #[test]
-    fn encode_data_10_000_001_s() {
-        simple_test(10_000_001);
-    }
-
-    #[test]
-    fn encode_data_100_000_001_s() {
-        simple_test(100_000_001);
+    fn rq_test_10_000_001_s() {
+        encode_decode(10_000_001);
     }
 }
