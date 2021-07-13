@@ -37,6 +37,7 @@ service RaptorQ {
   // Output:
   //      EncodeReply
   //          path            - location of the output symbol files
+  //          symbols_count   - number of created symbol files
   //
   rpc Encode(EncodeRequest) returns(EncodeReply);
 
@@ -74,6 +75,7 @@ message EncodeRequest {
 
 message EncodeReply {
   string path = 1;
+  uint32 symbols_count = 2;
 }
 
 message DecodeRequest {

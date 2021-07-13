@@ -8,11 +8,12 @@ version = "0.1.0"
 authors = ["ayk"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-[profile.test]
-opt-level = 2
-
 [dependencies]
+# raptorQ
+#raptorq = "1.6.3"
+#raptorq = {git = "https://github.com/pastelnetwork/raptorq"}
+raptorq = {path = "../raptorq"}
+
 # Config
 clap = "2.33.3"
 config = "0.11.0"
@@ -30,14 +31,12 @@ prost = "0.7.0"
 tokio = {version = "1.5.0", features = ["full"]}
 tokio-stream ="0.1.5"
 
-# raptorQ
-raptorq = "1.6.3"
-base64-url = "1.4.10"
-
 # other
 base64 = "0.13.0"
+base64-url = "1.4.10"
 sha3 = "0.9.1"
 rand = "0.8.4"
+uuid = {version = "0.8.2", features = ["v4"]}
 itertools = "0.10.1"
 
 [build-dependencies]

@@ -5,7 +5,6 @@
 use clap::{Arg, App, ArgMatches};
 use config::{ConfigError, Config, File};
 use std::env;
-use dirs;
 
 const NIX_PASTELD_PATH: &str = ".pastel";
 const MAC_PASTELD_PATH: &str = "Library/Application Support/Pastel";
@@ -61,7 +60,7 @@ impl ServiceSettings {
             config_path})
     }
 
-    fn cmd_args_new(config_path: &String) -> ArgMatches<'static> {
+    fn cmd_args_new(config_path: &str) -> ArgMatches<'static> {
         App::new("rqservice")
             .version("v0.1.0")
             .author("Pastel Network <pastel.network>")
@@ -81,7 +80,7 @@ impl ServiceSettings {
             .get_matches()
     }
 
-    fn init_cfg(config_path: &String, cmd_args: &ArgMatches) -> config::Config {
+    fn init_cfg(config_path: &str, cmd_args: &ArgMatches) -> config::Config {
         let config_file = cmd_args.value_of("config").unwrap_or(&config_path);
 
         let mut cfg = Config::default();

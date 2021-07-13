@@ -4,8 +4,6 @@
 
 use crate::app::ServiceSettings;
 
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 
 pub mod rq {
@@ -13,7 +11,6 @@ pub mod rq {
 }
 use rq::raptor_q_server::{RaptorQ, RaptorQServer};
 use rq::{EncodeMetaDataRequest, EncodeMetaDataReply, EncodeRequest, EncodeReply, DecodeRequest, DecodeReply};
-use tokio_stream::StreamExt;
 
 use crate::rqprocessor;
 
@@ -27,14 +24,13 @@ impl RaptorQ for RaptorQService {
     async fn encode_meta_data(&self, request: Request<EncodeMetaDataRequest>) -> Result<Response<EncodeMetaDataReply>, Status> {
         log::info!("Got a 'encoder_info' request: {:?}", request);
 
-        let req = request.into_inner();
-
         let processor = rqprocessor::RaptorQProcessor::new(
             self.settings.symbol_size,
             self.settings.redundancy_factor);
 
+        let req = request.into_inner();
         match processor.create_metadata(req.path, req.files_number, req.block_hash, req.pastel_id) {
-            Some(meta) => {
+            Ok(meta) => {
 
                 let reply = rq::EncodeMetaDataReply {
                     encoder_parameters: meta.encoder_parameters,
@@ -43,7 +39,8 @@ impl RaptorQ for RaptorQService {
 
                 Ok(Response::new(reply))
             },
-            None => {
+            Err(e) => {
+                log::error!("Internal error: {:?}", e);
                 Err(Status::internal("Internal error"))
             }
         }
@@ -64,7 +61,7 @@ impl RaptorQ for RaptorQService {
         // let symbols = rq_encoder.get_packets();
 
 
-        let reply = rq::EncodeReply { path: String::new() };
+        let reply = rq::EncodeReply { path: String::new(), symbols_count: 0 };
 
         Ok(Response::new(reply))
     }
