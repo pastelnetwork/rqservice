@@ -49,21 +49,25 @@ impl RaptorQ for RaptorQService {
     async fn encode(&self, request: Request<EncodeRequest>) -> Result<Response<EncodeReply>, Status> {
         log::info!("Got a 'encode' request: {:?}", request);
 
-        // // creating a queue or channel
-        // let (tx, rx) = mpsc::channel(10); //buffer is 10 messages
-        //
-        // let req = request.into_inner();
-        //
-        // let rq_encoder = rqprocessor::RaptorQEncoder::new(
-        //     self.settings.symbol_size,
-        //     self.settings.redundancy_factor,
-        //     &req.data);
-        // let symbols = rq_encoder.get_packets();
+        let processor = rqprocessor::RaptorQProcessor::new(
+            self.settings.symbol_size,
+            self.settings.redundancy_factor);
 
+        let req = request.into_inner();
+        match processor.encode(req.path) {
+            Ok((path, symbols_count)) => {
 
-        let reply = rq::EncodeReply { path: String::new(), symbols_count: 0 };
+                let reply = rq::EncodeReply {
+                    path,
+                    symbols_count };
 
-        Ok(Response::new(reply))
+                Ok(Response::new(reply))
+            },
+            Err(e) => {
+                log::error!("Internal error: {:?}", e);
+                Err(Status::internal("Internal error"))
+            }
+        }
     }
     async fn decode(&self, request: Request<DecodeRequest>) -> Result<Response<DecodeReply>, Status> {
         log::info!("Got a 'decode' request: {:?}", request);
