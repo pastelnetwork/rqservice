@@ -29,13 +29,14 @@ impl RaptorQ for RaptorQService {
             self.settings.redundancy_factor);
 
         let req = request.into_inner();
-        match processor.create_metadata(req.path, req.files_number, req.block_hash, req.pastel_id) {
-            Ok(meta) => {
+        match processor.create_metadata(&req.path, req.files_number,
+                                        &req.block_hash, &req.pastel_id) {
+            Ok((meta, path)) => {
 
                 let reply = rq::EncodeMetaDataReply {
                     encoder_parameters: meta.encoder_parameters,
-                    path: meta.path,
-                    symbol_names: meta.symbol_names };
+                    symbols_count: meta.source_symbols+meta.repair_symbols,
+                    path };
 
                 Ok(Response::new(reply))
             },
@@ -54,12 +55,13 @@ impl RaptorQ for RaptorQService {
             self.settings.redundancy_factor);
 
         let req = request.into_inner();
-        match processor.encode(req.path) {
-            Ok((path, symbols_count)) => {
+        match processor.encode(&req.path) {
+            Ok((meta, path)) => {
 
                 let reply = rq::EncodeReply {
-                    path,
-                    symbols_count };
+                    encoder_parameters: meta.encoder_parameters,
+                    symbols_count: meta.source_symbols+meta.repair_symbols,
+                    path };
 
                 Ok(Response::new(reply))
             },
@@ -72,13 +74,22 @@ impl RaptorQ for RaptorQService {
     async fn decode(&self, request: Request<DecodeRequest>) -> Result<Response<DecodeReply>, Status> {
         log::info!("Got a 'decode' request: {:?}", request);
 
-        // let mut stream = request.into_inner();
-        //
-        // let mut rq_decoder: Option<rqprocessor::RaptorQDecoder> = None;
+        let processor = rqprocessor::RaptorQProcessor::new(
+            self.settings.symbol_size,
+            self.settings.redundancy_factor);
 
-        let reply = rq::DecodeReply { path: String::new() };
+        let req = request.into_inner();
+        match processor.decode(&req.encoder_parameters, &req.path) {
+            Ok(path) => {
 
-        Ok(Response::new(reply))
+                let reply = rq::DecodeReply { path };
+                Ok(Response::new(reply))
+            },
+            Err(e) => {
+                log::error!("Internal error: {:?}", e);
+                Err(Status::internal("Internal error"))
+            }
+        }
     }
 }
 

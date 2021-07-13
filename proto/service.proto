@@ -22,7 +22,7 @@ service RaptorQ {
   //      EncodeMetaDataReply
   //          encoder_parameters  - Object Transmission Information (12 bytes array)
   //          path                - path to the location of ID files
-  //          symbol_names        - array of the symbol names
+  //          symbols_count       - number of symbols
   //
   rpc EncodeMetaData(EncodeMetaDataRequest) returns(EncodeMetaDataReply);
 
@@ -65,8 +65,8 @@ message EncodeMetaDataRequest {
 
 message EncodeMetaDataReply {
   bytes encoder_parameters = 1;
-  string path = 2;
-  repeated string symbol_names = 3;
+  uint32 symbols_count = 2;
+  string path = 3;
 }
 
 message EncodeRequest {
@@ -74,8 +74,9 @@ message EncodeRequest {
 }
 
 message EncodeReply {
-  string path = 1;
+  bytes encoder_parameters = 1;
   uint32 symbols_count = 2;
+  string path = 3;
 }
 
 message DecodeRequest {
