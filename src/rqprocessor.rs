@@ -174,6 +174,17 @@ impl RaptorQProcessor {
     pub fn decode(self, encoder_parameters: &Vec<u8>, path: &String)
         -> Result<String, RQProcessorError> {
 
+        if path.is_empty() {
+            return Err(RQProcessorError::new("decode",
+                                             "Input symbol's path is empty",
+                                             "".to_string()));
+        }
+        if encoder_parameters.len() == 0 {
+            return Err(RQProcessorError::new("decode",
+                                             "encoder_parameters are empty",
+                                             "".to_string()));
+        }
+
         let mut cfg = [0u8; 12];
         cfg.iter_mut().set_from(encoder_parameters.iter().cloned());
 
