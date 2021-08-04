@@ -8,5 +8,12 @@ jobs:
       - checkout
       - run: cargo --version
       - run:
+          name: Create temp files for testing
+          command: |
+            mkdir test;
+            dd if=/dev/urandom of=test/10_000 bs=1 count=10000;
+            dd if=/dev/urandom of=test/10_000_000 bs=1 count=10000000;
+            dd if=/dev/urandom of=test/10_000_001 bs=1 count=10000001;
+      - run:
           name: Run Tests
-          command: "cargo test"
+          command: "cargo test --release"
