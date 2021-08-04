@@ -10,9 +10,9 @@ edition = "2018"
 
 [dependencies]
 # raptorQ
-#raptorq = "1.6.3"
+raptorq = "1.6.3"
 #raptorq = {git = "https://github.com/pastelnetwork/raptorq"}
-raptorq = {path = "../raptorq"}
+#raptorq = {path = "../raptorq"}
 
 # Config
 clap = "2.33.3"
