@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::fs::File;
 use std::{fs, fmt, io};
 use uuid::Uuid;
+use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct RaptorQProcessor {
@@ -27,22 +28,30 @@ pub struct EncoderMetaData {
 }
 
 #[derive(Debug, Clone)]
-pub struct RQProcessorError {
+pub struct RqProcessorError {
     func: String,
     msg: String,
     prev_msg: String
 }
 
-impl RQProcessorError {
-    pub fn new(func: &str, msg: &str, prev_msg: String) -> RQProcessorError {
-        RQProcessorError {
+#[derive(Serialize, Deserialize)]
+struct RqIdsFile {
+    id: String,
+    block_hash: String,
+    pastel_id: String,
+    symbol_identifiers: Vec<String>
+}
+
+impl RqProcessorError {
+    pub fn new(func: &str, msg: &str, prev_msg: String) -> RqProcessorError {
+        RqProcessorError {
             func: func.to_string(),
             msg: msg.to_string(),
             prev_msg
         }
     }
-    pub fn new_file_err(func: &str, msg: &str, path: &Path, prev_msg: String) -> RQProcessorError {
-        RQProcessorError {
+    pub fn new_file_err(func: &str, msg: &str, path: &Path, prev_msg: String) -> RqProcessorError {
+        RqProcessorError {
             func: func.to_string(),
             msg: format!("{} [path: {:?}]", msg, path),
             prev_msg
@@ -50,16 +59,16 @@ impl RQProcessorError {
     }
 }
 
-impl std::error::Error for RQProcessorError {}
-impl fmt::Display for RQProcessorError {
+impl std::error::Error for RqProcessorError {}
+impl fmt::Display for RqProcessorError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "In [{}], Error [{}] (internal error - {})", self.func, self.msg, self.prev_msg)
     }
 }
 
-impl From<io::Error> for RQProcessorError{
+impl From<io::Error> for RqProcessorError {
     fn from(error: io::Error) -> Self {
-        RQProcessorError{
+        RqProcessorError {
             func: "RQProcessorError".to_string(),
             msg: String::new(),
             prev_msg: error.to_string()
@@ -67,9 +76,9 @@ impl From<io::Error> for RQProcessorError{
     }
 }
 
-impl From<String> for RQProcessorError{
+impl From<String> for RqProcessorError {
     fn from(error: String) -> Self {
-        RQProcessorError{
+        RqProcessorError {
             func: "RQProcessorError".to_string(),
             msg: error,
             prev_msg: String::new()
@@ -77,12 +86,22 @@ impl From<String> for RQProcessorError{
     }
 }
 
-impl From<&str> for RQProcessorError{
+impl From<&str> for RqProcessorError {
     fn from(error: &str) -> Self {
-        RQProcessorError{
+        RqProcessorError {
             func: "RQProcessorError".to_string(),
             msg: error.to_string(),
             prev_msg: String::new()
+        }
+    }
+}
+
+impl From<serde_json::Error> for RqProcessorError {
+    fn from(error: serde_json::Error) -> Self {
+        RqProcessorError {
+            func: "RQProcessorError".to_string(),
+            msg: String::new(),
+            prev_msg: error.to_string()
         }
     }
 }
@@ -99,7 +118,7 @@ impl RaptorQProcessor {
 
     pub fn create_metadata(&self, path: &String, files_number: u32,
                            block_hash: &String, pastel_id: &String )
-        -> Result<(EncoderMetaData, String), RQProcessorError> {
+        -> Result<(EncoderMetaData, String), RqProcessorError> {
 
         let input = Path::new(&path);
         let (enc, repair_symbols) = self.get_encoder(input)?;
@@ -113,6 +132,16 @@ impl RaptorQProcessor {
                 }
             ).collect();
 
+        let names_len = names.len() as u32;
+
+        let mut rq_ids_file = RqIdsFile {
+            id: "".to_string(),
+            block_hash: block_hash.to_string(),
+            pastel_id: pastel_id.to_string(),
+            symbol_identifiers: names
+        };
+
+
         let (output_path_str, output_path) =
             RaptorQProcessor::output_location(input, "meta")?;
 
@@ -120,13 +149,12 @@ impl RaptorQProcessor {
             let guid = Uuid::new_v4();
             let output_file_path = output_path.join(guid.to_string());
 
+            rq_ids_file.id = guid.to_string();
+            let j = serde_json::to_string(&rq_ids_file)?;
+
             RaptorQProcessor::create_and_write("create_metadata", &output_file_path,
                              |output_file| {
-                                 write!(&output_file, "{}\n{}\n{}\n{}",
-                                        guid,
-                                        block_hash,
-                                        pastel_id,
-                                        names.join("\n"))
+                                 write!(&output_file, "{}", j)
                              })?;
 
         }
@@ -134,13 +162,13 @@ impl RaptorQProcessor {
         Ok(
             (EncoderMetaData {
                 encoder_parameters: enc.get_config().serialize().to_vec(),
-                source_symbols: names.len() as u32 - repair_symbols,
+                source_symbols: names_len - repair_symbols,
                 repair_symbols},
             output_path_str)
         )
     }
 
-    pub fn encode(&self, path: &String) -> Result<(EncoderMetaData, String), RQProcessorError> {
+    pub fn encode(&self, path: &String) -> Result<(EncoderMetaData, String), RqProcessorError> {
 
         let input = Path::new(&path);
         let (enc, repair_symbols) = self.get_encoder(input)?;
@@ -172,15 +200,15 @@ impl RaptorQProcessor {
     }
 
     pub fn decode(self, encoder_parameters: &Vec<u8>, path: &String)
-        -> Result<String, RQProcessorError> {
+        -> Result<String, RqProcessorError> {
 
         if path.is_empty() {
-            return Err(RQProcessorError::new("decode",
+            return Err(RqProcessorError::new("decode",
                                              "Input symbol's path is empty",
                                              "".to_string()));
         }
         if encoder_parameters.len() == 0 {
-            return Err(RQProcessorError::new("decode",
+            return Err(RqProcessorError::new("decode",
                                              "encoder_parameters are empty",
                                              "".to_string()));
         }
@@ -194,9 +222,9 @@ impl RaptorQProcessor {
         let symbol_files = match fs::read_dir(&path) {
             Ok(paths) => paths,
             Err(err) => {
-                return Err(RQProcessorError::new("decode",
-                                                  format!("Cannot get list of input files from {}", &path).as_str(),
-                                                  err.to_string()));
+                return Err(RqProcessorError::new("decode",
+                                                 format!("Cannot get list of input files from {}", &path).as_str(),
+                                                 err.to_string()));
             }
         };
 
@@ -205,9 +233,9 @@ impl RaptorQProcessor {
             let file_path = match symbol_file {
                 Ok(path) => path.path(),
                 Err(err) => {
-                    return Err(RQProcessorError::new("decode",
-                                                      "Cannot get file path",
-                                                      err.to_string()));
+                    return Err(RqProcessorError::new("decode",
+                                                     "Cannot get file path",
+                                                     err.to_string()));
                 }
             };
 
@@ -230,13 +258,13 @@ impl RaptorQProcessor {
             };
         }
 
-        Err(RQProcessorError::new("decode",
+        Err(RqProcessorError::new("decode",
                                   format!("Cannot restore the original file from symbols at {}", path).as_str(),
                                   "".to_string()))
     }
 
     fn output_location(input: &Path, sub: &str)
-                       -> Result<(String, PathBuf), RQProcessorError> {
+                       -> Result<(String, PathBuf), RqProcessorError> {
 
         let output_path = match input.parent() {
             Some(p) => {
@@ -247,7 +275,7 @@ impl RaptorQProcessor {
                 }
             },
             None => {
-                return Err(RQProcessorError::new_file_err("output_location",
+                return Err(RqProcessorError::new_file_err("output_location",
                                                           "Cannot get parent of the input location",
                                                           input,
                                                           "".to_string()));
@@ -255,7 +283,7 @@ impl RaptorQProcessor {
         };
         if let Err(err) = fs::create_dir_all(&output_path)
         {
-            return Err(RQProcessorError::new_file_err("output_location",
+            return Err(RqProcessorError::new_file_err("output_location",
                                                       "Cannot create output location",
                                                       output_path.as_path(),
                                                       err.to_string()));
@@ -268,22 +296,22 @@ impl RaptorQProcessor {
 
     }
 
-    fn path_buf_to_string(path: &PathBuf, func: &str, msg: &str) -> Result<String, RQProcessorError> {
+    fn path_buf_to_string(path: &PathBuf, func: &str, msg: &str) -> Result<String, RqProcessorError> {
         match path.to_str(){
             Some(path_str) => Ok(path_str.to_string()),
-            None => Err(RQProcessorError::new_file_err(func,
+            None => Err(RqProcessorError::new_file_err(func,
                                                        msg,
                                                        path.as_path(),
                                                        "".to_string()))
         }
     }
 
-    fn get_encoder(&self, path: &Path) -> Result<(Encoder, u32), RQProcessorError> {
+    fn get_encoder(&self, path: &Path) -> Result<(Encoder, u32), RqProcessorError> {
 
         let mut file = match File::open(&path){
             Ok(file) => file,
             Err(err) => {
-                return Err(RQProcessorError::new_file_err("get_encoder",
+                return Err(RqProcessorError::new_file_err("get_encoder",
                                                           "Cannot open file",
                                                           path,
                                                           err.to_string()));
@@ -293,7 +321,7 @@ impl RaptorQProcessor {
         let source_size = match file.metadata() {
             Ok(metadata) => metadata.len(),
             Err(err) => {
-                return Err(RQProcessorError::new_file_err("get_encoder",
+                return Err(RqProcessorError::new_file_err("get_encoder",
                                                           "Cannot access metadata of file",
                                                           path,
                                                           err.to_string()));
@@ -312,7 +340,7 @@ impl RaptorQProcessor {
                                                               self.redundancy_factor,
                                                               source_size))),
             Err(err) => {
-                Err(RQProcessorError::new_file_err("get_encoder",
+                Err(RqProcessorError::new_file_err("get_encoder",
                                                    "Cannot read input file",
                                                    path,
                                                    err.to_string()))
@@ -321,13 +349,13 @@ impl RaptorQProcessor {
     }
 
     fn create_and_write<F>(func: &str, output_file_path: &PathBuf, f: F)
-                           -> Result<(), RQProcessorError>
+                           -> Result<(), RqProcessorError>
         where F: Fn(File) -> std::io::Result<()> {
 
         let output_file = match File::create(&output_file_path){
             Ok(file) => file,
             Err(err) => {
-                return Err(RQProcessorError::new_file_err(func,
+                return Err(RqProcessorError::new_file_err(func,
                                                           "Cannot create file",
                                                           output_file_path.as_path(),
                                                           err.to_string()));
@@ -335,7 +363,7 @@ impl RaptorQProcessor {
         };
 
         if let Err(err) = f(output_file) {
-            return Err(RQProcessorError::new_file_err(func,
+            return Err(RqProcessorError::new_file_err(func,
                                                       "Cannot write into the file",
                                                       output_file_path.as_path(),
                                                       err.to_string()));
@@ -343,12 +371,12 @@ impl RaptorQProcessor {
         Ok(())
     }
 
-    fn open_and_read(func: &str, file_path: &PathBuf, data: &mut Vec<u8>) -> Result<(), RQProcessorError> {
+    fn open_and_read(func: &str, file_path: &PathBuf, data: &mut Vec<u8>) -> Result<(), RqProcessorError> {
 
         let mut file = match File::open(&file_path) {
             Ok(file) => file,
             Err(err) => {
-                return Err(RQProcessorError::new_file_err(func,
+                return Err(RqProcessorError::new_file_err(func,
                                                           "Cannot open file",
                                                           file_path.as_path(),
                                                           err.to_string()));
@@ -356,7 +384,7 @@ impl RaptorQProcessor {
         };
 
         if let Err(err) = file.read_to_end(data) {
-            return Err(RQProcessorError::new_file_err(func,
+            return Err(RqProcessorError::new_file_err(func,
                                                       "Cannot read input file",
                                                       file_path.as_path(),
                                                       err.to_string()));
