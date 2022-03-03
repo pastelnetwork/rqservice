@@ -62,7 +62,7 @@ impl ServiceSettings {
 
     fn cmd_args_new(config_path: &str) -> ArgMatches<'static> {
         App::new("rqservice")
-            .version("v0.1.0")
+            .version("v1.1.beta.1")
             .author("Pastel Network <pastel.network>")
             .about("RaptorQ Service")
             .arg(Arg::with_name("config")
