@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2021 The Pastel Core developers
+// Copyright (c) 2021-2023 The Pastel Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,6 +7,8 @@ use flexi_logger::{Logger, FileSpec, WriteMode};
 pub mod app;
 pub mod rqserver;
 pub mod rqprocessor;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,7 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write_mode(WriteMode::Async)
         .start()?;
 
-    rqserver::start_server(&settings).await?;
+    let manager = SqliteConnectionManager::file(rqprocessor::DB_PATH);
+    let pool = Pool::new(manager).expect("Failed to create pool.");
+
+    // Initialize the database
+    rqprocessor::RaptorQProcessor::initialize_db(rqprocessor::DB_PATH)?;
+
+    rqserver::start_server(&settings, &pool).await?;
 
     Ok(())
 }
