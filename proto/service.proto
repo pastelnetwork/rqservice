@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2021 The Pastel Core developers
+// Copyright (c) 2021-2023 The Pastel Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,9 +7,9 @@ syntax = "proto3";
 package raptorq;
 
 service RaptorQ {
-  // Get list of symbol ids and encoder parameter
+  // Get metadata including list of symbol ids and encoder parameter
   //
-  // Performs encoding, but doesn't return actual symbols, instead returns list of symbol's identifiers
+  // Performs encoding and stores the symbols in the SQLite database
   //
   // Input:
   //      EncodeMetaDataRequest
@@ -21,14 +21,12 @@ service RaptorQ {
   // Output:
   //      EncodeMetaDataReply
   //          encoder_parameters  - Object Transmission Information (12 bytes array)
-  //          path                - path to the location of ID files
+  //          path                - path to the SQLite database storing the symbols
   //          symbols_count       - number of symbols
   //
   rpc EncodeMetaData(EncodeMetaDataRequest) returns(EncodeMetaDataReply);
 
-  // Encode input data blob into symbols
-  //
-  // Performs encoding, and returns actual symbols as gRPC stream
+  // Encode input data blob into symbols and store them in SQLite database
   //
   // Input:
   //      EncodeRequest
@@ -36,22 +34,22 @@ service RaptorQ {
   //
   // Output:
   //      EncodeReply
-  //          path            - location of the output symbol files
-  //          symbols_count   - number of created symbol files
+  //          encoder_parameters - Object Transmission Information (12 bytes array)
+  //          symbols_count      - number of created symbol files
+  //          path               - path to the SQLite database storing the symbols
   //
   rpc Encode(EncodeRequest) returns(EncodeReply);
 
-  // Decode symbols back into original data blob
-  //
-  // Performs decoding, and returns original data blob
+  // Decode symbols back into original data blob using SQLite database
   //
   // Input:
   //      DecodeRequest
   //          encoder_parameters  - Object Transmission Information (12 bytes array)
-  //          path                - location of the input file
+  //          path                - location of the SQLite database with symbols
   //
   // Output:
-  //      Data blob
+  //      DecodeReply
+  //          path                - path to the restored original file
   //
   rpc Decode(DecodeRequest) returns(DecodeReply);
 }
