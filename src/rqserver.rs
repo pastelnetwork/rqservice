@@ -45,18 +45,22 @@ impl RaptorQ for RaptorQService {
 
     async fn encode_meta_data(&self, request: Request<EncodeMetaDataRequest>) -> Result<Response<EncodeMetaDataReply>, Status> {
         log::info!("Got an 'encoder_info' request: {:?}", request);
-    
-        let processor = rqprocessor::RaptorQProcessor::new(
-            self.settings.symbol_size,
-            self.settings.redundancy_factor);
-    
-        let req = request.into_inner();
-    
-        // Use the entire connection pool, not just a single connection
+
+        let processor_result = rqprocessor::RaptorQProcessor::new();
+        let processor = match processor_result {
+            Ok(processor) => processor,
+            Err(err) => {
+                log::error!("Failed to create processor: {:?}", err);
+                return Err(Status::internal("Failed to create processor"));
+            }
+        };
+
+        let req = request.into_inner();    
+
         let pool = &self.pool; // Make sure to access the pool in your specific context
     
         match processor.create_metadata_and_store(&req.path, &req.block_hash, &req.pastel_id, pool) {
-            Ok((meta, path)) => {
+                                    Ok((meta, path)) => {
                 // Build the reply using the meta and path
                 let reply = rq::EncodeMetaDataReply {
                     encoder_parameters: meta.encoder_parameters,
@@ -78,10 +82,14 @@ impl RaptorQ for RaptorQService {
     async fn encode(&self, request: Request<EncodeRequest>) -> Result<Response<EncodeReply>, Status> {
         log::info!("Got a 'encode' request: {:?}", request);
     
-        let processor = rqprocessor::RaptorQProcessor::new(
-            self.settings.symbol_size,
-            self.settings.redundancy_factor);
-    
+        let processor_result = rqprocessor::RaptorQProcessor::new();
+        let processor = match processor_result {
+            Ok(processor) => processor,
+            Err(err) => {
+                log::error!("Failed to create processor: {:?}", err);
+                return Err(Status::internal("Failed to create processor"));
+            }
+        };
         let req = request.into_inner();
         
         // Use the connection pool that was created in main.rs
@@ -107,10 +115,14 @@ impl RaptorQ for RaptorQService {
     async fn decode(&self, request: Request<DecodeRequest>) -> Result<Response<DecodeReply>, Status> {
         log::info!("Got a 'decode' request: {:?}", request);
     
-        let processor = rqprocessor::RaptorQProcessor::new(
-            self.settings.symbol_size,
-            self.settings.redundancy_factor);
-    
+        let processor_result = rqprocessor::RaptorQProcessor::new();
+        let processor = match processor_result {
+            Ok(processor) => processor,
+            Err(err) => {
+                log::error!("Failed to create processor: {:?}", err);
+                return Err(Status::internal("Failed to create processor"));
+            }
+        };
         // Obtain a database connection
         let conn = match self.pool.get() {
             Ok(connection) => connection,
