@@ -600,6 +600,8 @@ impl From<Box<dyn std::error::Error>> for RqProcessorError {
 // Test Code
 #[cfg(test)]
 mod tests {
+    const TEST_DB_PATH: &str = "../test_files/test_rq_symbols.sqlite";
+
 
     impl From<RqProcessorError> for TestError {
         fn from(err: RqProcessorError) -> Self {
@@ -627,9 +629,11 @@ mod tests {
 
     // Utility Functions
     fn setup_pool() -> Pool<SqliteConnectionManager> {
-        let manager = SqliteConnectionManager::file(DB_PATH); // Assuming DB_PATH is the path to your SQLite database
+        log::info!("Attempting to open Sqlite Pool for TEST_DB_PATH at path: {}", TEST_DB_PATH); 
+        let manager = SqliteConnectionManager::file(TEST_DB_PATH); // Use the test database path
         Pool::new(manager).expect("Failed to create pool.")
     }
+
 
     fn test_meta(pool: &Pool<SqliteConnectionManager>, path: String, size: u32) -> Result<(EncoderMetaData, String), TestError> {
         log::info!("Testing file {}", path);
@@ -755,8 +759,8 @@ mod tests {
         use std::fs;
         use rand::prelude::SliceRandom;
 
-        const TEST_DB_PATH: &str = "test_rq_symbols.sqlite";
-        const STATIC_TEST_FILE: &str = "input_test_file.jpg"; // Path to a real sample file
+        const TEST_DB_PATH: &str = "../test_files/test_rq_symbols.sqlite";
+        const STATIC_TEST_FILE: &str = "../test_files/input_test_file.jpg"; // Path to a real sample file
 
 
         fn generate_test_file() -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
@@ -784,67 +788,92 @@ mod tests {
         #[test]
         fn test_rqprocessor() -> Result<(), Box<dyn std::error::Error>> {
             // Read the configuration
+            log::info!("Reading rqconfig.toml at path: rqconfig.toml");
             let config = toml::from_str::<Config>(&fs::read_to_string("rqconfig.toml")?)?;
             let redundancy_factor = config.redundancy_factor as f64;
 
             // Choose between using a static test file or generating a random test file
+            log::info!("Opening STATIC_TEST_FILE at path: {}", STATIC_TEST_FILE);
             let (input_test_file, input_test_file_data) = if Path::new(STATIC_TEST_FILE).exists() {
                 (STATIC_TEST_FILE.to_string(), fs::read(STATIC_TEST_FILE)?)
             } else {
                 generate_test_file()?
             };
 
+            log::info!("Opening TEST_DB_PATH at path: {}", TEST_DB_PATH); 
             // Initialize database
             let conn = RaptorQProcessor::initialize_db(TEST_DB_PATH)?;
 
+            log::info!("Creating RaptorQProcessor now..."); 
             // Create processor
             let processor = RaptorQProcessor::create_processor()?;
+            log::info!("RaptorQProcessor created.");
 
             // Compute original file hash
             let original_file_hash = sha3_256_hash(&input_test_file_data);
+            log::info!("Original file hash computed: {}", original_file_hash);
 
             // Create metadata and store
+            log::info!("Creating metadata and storing...");
             let pool = setup_pool();
+            log::info!("Pool created.");
+            log::info!("Creating metadata and storing...");
             let (metadata, _db_path) = processor.create_metadata_and_store(
                 &input_test_file,
                 &"block_hash".to_string(),
                 &"pastel_id".to_string(),
                 &pool,
             )?;
+            log::info!("Metadata created and stored.");
 
+            log::info!("source symbols = {}; repair symbols = {}", metadata.source_symbols, metadata.repair_symbols);
             // Number of random decoding attempts
             let attempts = 10;
             // Number of symbols to fetch for decoding
             let symbols_to_fetch = ((1.0 / redundancy_factor) * 1.05 * metadata.source_symbols as f64).ceil() as usize;
+            log::info!("Number of random decoding attempts: {}", attempts);
+            log::info!("Number of symbols to fetch for decoding: {}", symbols_to_fetch);
 
-
-            for _ in 0..attempts {
+            log::info!("Now attempting to recononstruct original file {} {} times...", STATIC_TEST_FILE, attempts);
+            for attempt_number in 0..attempts {
+                log::info!("Attempt {}...", attempt_number);
                 // Prepare the statement
                 let mut stmt = conn.prepare("SELECT rq_symbol_file_data FROM rq_symbols WHERE original_file_sha3_256_hash = ?1")?;
+                log::info!("Statement prepared: {:?}", stmt);
                 // Query the symbols with the original file hash
                 let all_symbols: Result<Vec<Vec<u8>>, _> = stmt.query_map(params![&original_file_hash], |row| {
                     row.get(0)
                 })?.collect();
+                log::info!("Symbols queried: {:?}", all_symbols);
         
                 // Unwrap the result or handle the error as needed
                 let all_symbols = all_symbols?;
         
                 // Randomly select a subset of symbols
                 let mut rng = rand::thread_rng();
+                log::info!("Randomly selecting a subset of symbols...");
                 let selected_symbols: Vec<Vec<u8>> = all_symbols.choose_multiple(&mut rng, symbols_to_fetch).cloned().collect();
-        
+                log::info!("Subset of symbols selected: {:?}", selected_symbols);
+
                 // Decode using the selected subset and verify
+                log::info!("Decoding using the selected subset and verifying...");
                 let decoded_file_data = processor.decode_with_selected_symbols(&selected_symbols, &metadata.encoder_parameters)?;
                 let decoded_file_hash = sha3_256_hash(&decoded_file_data);
+                log::info!("Decoded file hash: {}", decoded_file_hash);
+                log::info!("Original file hash: {}", original_file_hash);
+                log::info!("Decoded file size: {}", decoded_file_data.len());
                 assert_eq!(original_file_hash, decoded_file_hash, "Reconstructed file hash does not match original file hash");
+                log::info!("Reconstructed file hash matches original file hash! Trying again...");
             }
         
+            log::info!("All attempts successful!");
+            log::info!("Cleaning up...");
             // Clean up (optional)
             if !Path::new(STATIC_TEST_FILE).exists() {
                 fs::remove_file(input_test_file)?;
             }
             fs::remove_file(TEST_DB_PATH)?;
-        
+            log::info!("Clean up complete!");
             Ok(())
         }
 }
