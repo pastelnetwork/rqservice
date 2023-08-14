@@ -46,7 +46,9 @@ impl RaptorQ for RaptorQService {
     async fn encode_meta_data(&self, request: Request<EncodeMetaDataRequest>) -> Result<Response<EncodeMetaDataReply>, Status> {
         log::info!("Got an 'encoder_info' request: {:?}", request);
 
-        let processor_result = rqprocessor::RaptorQProcessor::new();
+        // Create the RaptorQProcessor with the specified DB path
+        let processor_result = rqprocessor::RaptorQProcessor::new(DB_PATH);
+
         let processor = match processor_result {
             Ok(processor) => processor,
             Err(err) => {
@@ -54,7 +56,6 @@ impl RaptorQ for RaptorQService {
                 return Err(Status::internal("Failed to create processor"));
             }
         };
-
         let req = request.into_inner();    
 
         let pool = &self.pool; // Make sure to access the pool in your specific context
@@ -82,7 +83,9 @@ impl RaptorQ for RaptorQService {
     async fn encode(&self, request: Request<EncodeRequest>) -> Result<Response<EncodeReply>, Status> {
         log::info!("Got a 'encode' request: {:?}", request);
     
-        let processor_result = rqprocessor::RaptorQProcessor::new();
+        // Create the RaptorQProcessor with the specified DB path
+        let processor_result = rqprocessor::RaptorQProcessor::new(DB_PATH);
+
         let processor = match processor_result {
             Ok(processor) => processor,
             Err(err) => {
@@ -115,7 +118,9 @@ impl RaptorQ for RaptorQService {
     async fn decode(&self, request: Request<DecodeRequest>) -> Result<Response<DecodeReply>, Status> {
         log::info!("Got a 'decode' request: {:?}", request);
     
-        let processor_result = rqprocessor::RaptorQProcessor::new();
+        // Create the RaptorQProcessor with the specified DB path
+        let processor_result = rqprocessor::RaptorQProcessor::new(DB_PATH);
+
         let processor = match processor_result {
             Ok(processor) => processor,
             Err(err) => {
