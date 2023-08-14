@@ -10,6 +10,9 @@ pub mod rqprocessor;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
+// pub const DB_PATH: &str = "/home/ubuntu/.pastel/testnet3/rq_symbols.sqlite";
+pub const DB_PATH: &str = "./test_files/rq_symbols.sqlite";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
@@ -24,11 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write_mode(WriteMode::Async)
         .start()?;
 
+    // Initialize the database
+    rqprocessor::initialize_database()?; // Calls the new initialize_database function
+
     let manager = SqliteConnectionManager::file(rqprocessor::DB_PATH);
     let pool = Pool::new(manager).expect("Failed to create pool.");
-
-    // Initialize the database
-    rqprocessor::RaptorQProcessor::initialize_db(rqprocessor::DB_PATH)?;
 
     rqserver::start_server(&settings, &pool).await?;
 
