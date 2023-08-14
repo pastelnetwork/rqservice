@@ -12,6 +12,10 @@ const MAC_PASTELD_PATH: &str = "Library/Application Support/Pastel";
 const WIN_PASTELD_PATH: &str = "AppData\\Roaming\\Pastel";
 const DEFAULT_CONFIG_FILE: &str = "rqservice";
 
+fn get_os_type() -> String {
+    env::var("TEST_OS").unwrap_or_else(|_| env::consts::OS.to_string())
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ServiceSettings {
     pub grpc_service: String,
@@ -40,13 +44,13 @@ impl ServiceSettings {
 
         match dirs::home_dir() {
             Some(path) => {
-                if env::consts::OS == "linux" {
+                if get_os_type() == "linux" {
                     pastel_path = format!("{}/{}", path.display(), NIX_PASTELD_PATH);
                     config_path = format!("{}/{}", pastel_path, DEFAULT_CONFIG_FILE);
-                } else if env::consts::OS == "macos" {
+                } else if get_os_type() == "macos" {
                     pastel_path = format!("{}/{}", path.display(), MAC_PASTELD_PATH);
                     config_path = format!("{}/{}", pastel_path, DEFAULT_CONFIG_FILE);
-                } else if env::consts::OS == "windows" {
+                } else if get_os_type() == "windows" {
                     pastel_path = format!("{}\\{}", path.display(), WIN_PASTELD_PATH);
                     config_path = format!("{}\\{}", pastel_path, DEFAULT_CONFIG_FILE);
                 } else {
@@ -116,7 +120,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_service_settings_unsupported() {
-        env::set_var("OS", "unsupported");
+        env::set_var("TEST_OS", "unsupported");
         ServiceSettings::new().unwrap();
     }
 }
