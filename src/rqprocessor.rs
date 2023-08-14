@@ -8,6 +8,7 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::fs::File;
 use std::{fmt, fs, io};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use chrono::Utc;
 use serde_derive::{Deserialize, Serialize};
 use rusqlite::{Connection, params};
@@ -21,9 +22,9 @@ use toml;
 lazy_static! {
     static ref WRITE_LOCK: Mutex<()> = Mutex::new(());
 }
-pub const NUM_WORKERS: usize = 4;
+pub const NUM_WORKERS: usize = 1;
 pub const DB_PATH: &str = crate::DB_PATH;
-pub const RQ_CONFIG_PATH: &str = "./examples/rqconfig.toml";
+pub const RQ_CONFIG_PATH: &str = "/home/ubuntu/rqservice/examples/rqconfig.toml";
 
 
 #[derive(Deserialize)]
@@ -84,9 +85,8 @@ enum WriteOperation {
 }
 
 
-
-pub fn initialize_database() -> Result<(), Box<dyn std::error::Error>> {
-    RaptorQProcessor::initialize_db(DB_PATH)?;
+pub fn initialize_database(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    RaptorQProcessor::initialize_db(db_path)?;
     Ok(())
 }
 
@@ -97,14 +97,15 @@ pub struct RaptorQProcessor {
 
 impl RaptorQProcessor {
 
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::initialize_db(DB_PATH)?; // Initialize the database
+    pub fn new(db_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::initialize_db(db_path)?; // Initialize the database
         let config = read_config()?;
         Ok(RaptorQProcessor {
             symbol_size: config.symbol_size,
             redundancy_factor: config.redundancy_factor,
         })
     }
+    
 
     pub fn compute_original_file_hash(&self, input: &Path) -> Result<String, RqProcessorError> {
         let mut file = File::open(input)
@@ -162,9 +163,9 @@ impl RaptorQProcessor {
         }
     
         set_pragma_if_different!("journal_mode", "WAL");
-        set_pragma_if_different!("synchronous", "NORMAL");
+        // set_pragma_if_different!("synchronous", "NORMAL");
         set_pragma_if_different!("cache_size", "-524288");
-        set_pragma_if_different!("busy_timeout", "3000");
+        set_pragma_if_different!("busy_timeout", "2000");
         set_pragma_if_different!("wal_autocheckpoint", "100");
     
         log::info!("Creating tables");
@@ -186,7 +187,7 @@ impl RaptorQProcessor {
                 files_number INT,
                 encoder_parameters BLOB,
                 block_hash TEXT,
-                pastel_id TEXT,
+                pastel_id TEXT
             )",
             params![],
         )?;
@@ -214,12 +215,14 @@ impl RaptorQProcessor {
         Ok(())
     }
 
+
     fn insert_worker_func(
         rx_queue: crossbeam::channel::Receiver<WriteOperation>,
         mut conn: r2d2::PooledConnection<SqliteConnectionManager>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let tx: rusqlite::Transaction<'_> = conn.transaction()?;
-    
+        let mut symbol_count = 0; // Counter to track the number of symbols processed
+        const N: usize = 100; // Change this to your desired logging interval
         // Process the write operations from the queue
         for write_op in rx_queue.iter() {
             match write_op {
@@ -229,15 +232,18 @@ impl RaptorQProcessor {
                 },
                 WriteOperation::Symbol((original_file_hash, symbol_hash, symbol_data, timestamp)) => {
                     RaptorQProcessor::insert_symbol(&tx, &symbol_hash, &original_file_hash, &symbol_data, timestamp)?;
-                    log::info!("Inserted symbol for original file hash: {}", original_file_hash);
+                    symbol_count += 1;
+                    if symbol_count % N == 0 {
+                        log::info!("Processed {} symbols so far for original file hash: {}", symbol_count, original_file_hash);
+                    }
                 },
             }
         }
-    
+
         tx.commit()?;
         Ok(())
     }
-    
+
     fn retrieve_original_file(conn: &Connection, original_file_hash: &str) -> Result<(String, f64, i32, Vec<u8>), rusqlite::Error> {
         let mut stmt = conn.prepare("SELECT original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters FROM original_files WHERE original_file_sha3_256_hash = ?1")?;
         let mut rows = stmt.query(params![original_file_hash])?;
@@ -261,7 +267,9 @@ impl RaptorQProcessor {
         let (enc, repair_symbols) = self.get_encoder(input)?;
         let names_len = enc.get_encoded_packets(repair_symbols).len() as u32;
     
+        
         // Prepare original file metadata
+        log::info!("Preparing original file metadata");
         let original_file_metadata = (
             original_file_hash.clone(),
             path.clone(),
@@ -271,14 +279,30 @@ impl RaptorQProcessor {
             pastel_id.clone(),
             enc.get_config().serialize().to_vec(),
         );
+        log::info!("Original file metadata prepared: {:?}", original_file_metadata);
     
+        log::info!("Preparing symbols...");
         // Prepare symbols
-        let symbols_and_files: Vec<_> = 
+        let symbols_and_files: Vec<_> = {
+            let counter = AtomicUsize::new(0);
             enc.get_encoded_packets(repair_symbols)
-            .par_iter()
-            .map(|packet| (original_file_hash.clone(), RaptorQProcessor::symbols_id(&packet.serialize()), packet.serialize(), get_current_timestamp()))
-            .collect();
+                .par_iter()
+                .map(|packet| {
+                    let index = counter.fetch_add(1, Ordering::Relaxed);
+                    if index % 100 == 0 {
+                        log::info!("Processing symbol {} out of {}", index, repair_symbols);
+                    }
+                    (
+                        original_file_hash.clone(),
+                        RaptorQProcessor::symbols_id(&packet.serialize()),
+                        packet.serialize(),
+                        get_current_timestamp(),
+                    )
+                })
+                .collect()
+        };
     
+        log::info!("Symbols prepared, now inserting...");
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
         let workers: Vec<_> = (0..NUM_WORKERS)
             .map(|_| {
@@ -291,19 +315,23 @@ impl RaptorQProcessor {
             })
             .collect();
             
+        log::info!("Inserting original file metadata...");
         // Send original file metadata to the worker
         tx_queue.send(WriteOperation::OriginalFile(original_file_metadata)).unwrap();
     
+        log::info!("Inserting symbols...");
         // Send symbols to the worker
         for symbol_data in symbols_and_files {
             tx_queue.send(WriteOperation::Symbol(symbol_data)).unwrap();
         }
     
+        log::info!("Waiting for workers to complete...");
         // Wait for worker threads to complete
         for worker in workers {
             worker.join().expect("Worker thread panicked");
         }
     
+        log::info!("Original file metadata and symbols inserted successfully.");
         Ok(
             (EncoderMetaData {
                 encoder_parameters: enc.get_config().serialize().to_vec(),
@@ -589,6 +617,7 @@ impl From<Box<dyn std::error::Error>> for RqProcessorError {
 #[cfg(test)]
 mod tests {
     use env_logger;
+    use serial_test::serial;
 
     fn setup() {
         let _ = env_logger::builder()
@@ -597,7 +626,7 @@ mod tests {
             .try_init();
     }
     
-    const TEST_DB_PATH: &str = "./test_files/test_rq_symbols.sqlite";
+    const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
 
     impl From<RqProcessorError> for TestError {
         fn from(err: RqProcessorError) -> Self {
@@ -633,9 +662,15 @@ mod tests {
     use std::io::Write;
     use rand::Rng;
     use tempfile::tempdir;
+    use std::sync::Mutex;
+
+    lazy_static::lazy_static! {
+        static ref TEST_MUTEX: Mutex<()> = Mutex::new(());
+    }
     
     // Utility Functions
     fn setup_pool() -> Pool<SqliteConnectionManager> {
+        let _guard = TEST_MUTEX.lock().unwrap();
         log::info!("Attempting to open Sqlite Pool for TEST_DB_PATH at path: {}", TEST_DB_PATH); 
         let manager = SqliteConnectionManager::file(TEST_DB_PATH); // Use the test database path
         Pool::new(manager).expect("Failed to create pool.")
@@ -644,30 +679,30 @@ mod tests {
 
     fn test_meta(pool: &Pool<SqliteConnectionManager>, path: String, size: u32) -> Result<(EncoderMetaData, String), TestError> {
         log::info!("Testing file {}", path);
-        let processor = RaptorQProcessor::new().map_err(TestError::Other)?;
+        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
 
-            let encode_time = Instant::now();
+        let encode_time = Instant::now();
 
-            match processor.create_metadata_and_store(&path, &String::from("12345"), &String::from("67890"), pool) {
-                    Ok((meta, path)) => {
-                    log::info!("source symbols = {}; repair symbols = {}", meta.source_symbols, meta.repair_symbols);
-        
-                    let source_symbols = (size as f64 / 50_000.0f64).ceil() as u32;
-                    assert_eq!(meta.source_symbols, source_symbols);
-        
-                    log::info!("{:?} spent to create symbols", encode_time.elapsed());
-                    Ok((meta, path))
-                }
-                Err(e) => Err(TestError::MetaError(format!(
-                    "create_metadata_and_store returned Error - {:?}",
-                    e
-                ))),
+        match processor.create_metadata_and_store(&path, &String::from("12345"), &String::from("67890"), pool) {
+                Ok((meta, path)) => {
+                log::info!("source symbols = {}; repair symbols = {}", meta.source_symbols, meta.repair_symbols);
+    
+                let source_symbols = (size as f64 / 50_000.0f64).ceil() as u32;
+                assert_eq!(meta.source_symbols, source_symbols);
+    
+                log::info!("{:?} spent to create symbols", encode_time.elapsed());
+                Ok((meta, path))
             }
+            Err(e) => Err(TestError::MetaError(format!(
+                "create_metadata_and_store returned Error - {:?}",
+                e
+            ))),
+        }
     }
         
     fn test_encode(pool: &Pool<SqliteConnectionManager>, path: String, size: u32) -> Result<(EncoderMetaData, String), TestError> {
         log::info!("Testing file {}", path);
-        let processor = RaptorQProcessor::new().map_err(TestError::Other)?; // Updated constructor
+        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
 
         let encode_time = Instant::now(); // Define the encode_time variable here
 
@@ -686,7 +721,7 @@ mod tests {
     fn test_decode(pool: &Pool<SqliteConnectionManager>, encoder_parameters: &Vec<u8>, original_file_hash: &str) -> Result<(), TestError> {
         let conn = pool.get().expect("Failed to get connection from pool.");
         log::info!("Testing file with original hash {}", original_file_hash);
-        let processor = RaptorQProcessor::new().map_err(TestError::Other)?; // Updated constructor
+        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
 
         match processor.decode(&conn, encoder_parameters, original_file_hash) {
             Ok(output_path) => {
@@ -703,7 +738,6 @@ mod tests {
         }
     }
 
-        
     fn create_random_file(file_path: &str, size: usize) -> std::io::Result<()> {
         let mut file = File::create(file_path)?;
         let mut rng = rand::thread_rng();
@@ -727,6 +761,7 @@ mod tests {
     #[test]
     fn rq_test_encode_decode() -> Result<(), TestError> {
         setup();
+        initialize_database(TEST_DB_PATH).unwrap();
         let dir = tempdir()?;
         let file_path = dir.path().join("10_000_000");
         create_random_file(file_path.to_str().unwrap(), 10_000_000)?;
@@ -734,7 +769,7 @@ mod tests {
         let pool = setup_pool();
         let (meta, _path) = test_encode(&pool, file_path.to_str().unwrap().to_string(), 10_000_000)?;
 
-        let processor = RaptorQProcessor::new()?;
+        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
         let original_file_hash = processor.compute_original_file_hash(&file_path)?;
 
         test_decode(&pool, &meta.encoder_parameters, &original_file_hash)?;
@@ -752,13 +787,11 @@ mod tests {
         use tempfile::tempdir;
         use RaptorQProcessor;
     
-        initialize_database().expect("Failed to initialize database");        
-
+        initialize_database(TEST_DB_PATH).unwrap();
         // Sizes to test: one that's a multiple of the chunk size and one that's not
         let sizes_to_test = [256 * 1024, 256 * 1024 + 1];
     
-        let processor: RaptorQProcessor = RaptorQProcessor::new().expect("Failed to create processor"); // Updated constructor
-    
+        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
         for size in sizes_to_test.iter() {
             // Create a temporary directory
             let dir = tempdir().expect("Failed to create temp dir");
@@ -785,8 +818,8 @@ mod tests {
         use std::fs;
         use rand::prelude::SliceRandom;
 
-        const TEST_DB_PATH: &str = "./test_files/test_rq_symbols.sqlite";
-        const STATIC_TEST_FILE: &str = "./test_files/input_test_file.jpg"; // Path to a real sample file
+        const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
+        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
 
 
         fn generate_test_file() -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
@@ -815,11 +848,15 @@ mod tests {
         }
 
         #[test]
+        #[serial]
         fn test_rqprocessor() -> Result<(), Box<dyn std::error::Error>> {
+            let _guard = TEST_MUTEX.lock().unwrap();
+            initialize_database(TEST_DB_PATH).unwrap();
+
             setup();
             // Read the configuration
             log::info!("Reading rqconfig.toml at path: rqconfig.toml");
-            let config = toml::from_str::<Config>(&fs::read_to_string("rqconfig.toml")?)?;
+            let config = toml::from_str::<Config>(&fs::read_to_string(RQ_CONFIG_PATH)?)?;
             let redundancy_factor = config.redundancy_factor as f64;
 
             // Choose between using a static test file or generating a random test file
@@ -837,7 +874,7 @@ mod tests {
 
             log::info!("Creating RaptorQProcessor now..."); 
             // Create processor
-            let processor = RaptorQProcessor::new()?;
+            let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();                        
             log::info!("RaptorQProcessor created.");
 
             // Compute original file hash
