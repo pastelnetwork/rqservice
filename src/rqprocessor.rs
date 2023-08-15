@@ -84,8 +84,8 @@ fn get_current_timestamp() -> i64 {
 enum WriteOperation {
     OriginalFile((String, String, f64, i32, String, String, Vec<u8>)),
     Symbol((String, String, Vec<u8>, i64)),
+    Terminate, // New termination signal
 }
-
 
 pub fn initialize_database(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     RaptorQProcessor::initialize_db(db_path)?;
@@ -204,7 +204,7 @@ impl RaptorQProcessor {
     }
     
     fn insert_original_file(tx: &rusqlite::Transaction, original_file_hash: &str, original_file_path: &str, original_file_size_in_mb: f64, files_number: i32, block_hash: &str, pastel_id: &str, encoder_parameters: &[u8]) -> Result<(), rusqlite::Error> {
-        log::info!("Inserting original file with hash: {}", original_file_hash);
+        log::info!("Inserting metadata for original file with hash: {}", original_file_hash);
         tx.execute(
             "INSERT OR REPLACE INTO original_files (original_file_sha3_256_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![original_file_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters],
@@ -213,18 +213,46 @@ impl RaptorQProcessor {
         Ok(())
     }
 
+    fn insert_symbols_with_retry(
+        conn: &mut r2d2::PooledConnection<SqliteConnectionManager>,
+        symbol_batch: &[(String, String, Vec<u8>, i64)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY: Duration = Duration::from_millis(50);
+        let mut retries = 0;
+        loop {
+            match RaptorQProcessor::insert_symbols_batch(conn, symbol_batch) {
+                Ok(_) => {
+                    log::info!("Symbols batch inserted successfully, containing {} symbol files.", symbol_batch.len());
+                    break;
+                }
+                Err(err) if retries < MAX_RETRIES => {
+                    log::warn!("Retrying symbols batch insertion. Retry count: {}. Error: {}", retries, err);
+                    retries += 1;
+                    let jitter = rand::thread_rng().gen_range(0..10);
+                    std::thread::sleep(RETRY_DELAY + Duration::from_millis(jitter));
+                }
+                Err(err) => {
+                    log::error!("Failed to insert symbols batch. Error: {}", err);
+                    return Err(err.into());
+                }
+            }
+        }
+        Ok(())
+    }
+    
     fn insert_worker_func(
         rx_queue: crossbeam::channel::Receiver<WriteOperation>,
         mut conn: r2d2::PooledConnection<SqliteConnectionManager>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        const MAX_RETRIES: u32 = 5; // Define maximum number of retries
-        const BATCH_SIZE: usize = 1000; // Define batch size for bulk insert
-        const RETRY_DELAY: Duration = Duration::from_millis(50); // Delay between retries
+        const MAX_RETRIES: u32 = 5;
+        const BATCH_SIZE: usize = 5000;
+        const RETRY_DELAY: Duration = Duration::from_millis(50);
         let mut symbol_batch: Vec<(String, String, Vec<u8>, i64)> = Vec::with_capacity(BATCH_SIZE);
         log::info!("Insert worker started with settings: MAX_RETRIES = {}, BATCH_SIZE = {}, RETRY_DELAY = {:?}", MAX_RETRIES, BATCH_SIZE, RETRY_DELAY);
         for write_op in rx_queue.iter() {
             match write_op {
-                WriteOperation::OriginalFile((original_file_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters)) => {
+                    WriteOperation::OriginalFile((original_file_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters)) => {
                     let mut retries = 0;
                     loop {
                         log::info!("Attempting to acquire write lock now...");
@@ -249,42 +277,26 @@ impl RaptorQProcessor {
                 WriteOperation::Symbol(symbol_data) => {
                     symbol_batch.push(symbol_data);
                     if symbol_batch.len() == BATCH_SIZE {
-                        // Retry logic for batch insertion
-                        let mut retries = 0;
-                        loop {
-                            match RaptorQProcessor::insert_symbols_batch(&mut conn, &symbol_batch) {
-                                Ok(_) => {
-                                    symbol_batch.clear();
-                                    break;
-                                }
-                                Err(_) if retries < MAX_RETRIES => {
-                                    retries += 1;
-                                    let jitter = rand::thread_rng().gen_range(0..10);
-                                    std::thread::sleep(RETRY_DELAY + Duration::from_millis(jitter));
-                                    }
-                                Err(err) => return Err(err.into()), // Convert the error into a boxed error
-                            }
-                        }
+                        RaptorQProcessor::insert_symbols_with_retry(&mut conn, &symbol_batch)?;
+                        symbol_batch.clear();
                     }
+                },
+                WriteOperation::Terminate => {
+                    break; // Break out of the loop when the termination signal is received
                 },
             }
         }
-        log::info!("Insert any remaining symbols in the batch with retry logic...");
-        if !symbol_batch.is_empty() {
-            let mut retries = 0;
-            loop {
-                match RaptorQProcessor::insert_symbols_batch(&mut conn, &symbol_batch) {
-                    Ok(_) => break,
-                    Err(_) if retries < MAX_RETRIES => {
-                        retries += 1;
-                        let jitter = rand::thread_rng().gen_range(0..10);
-                        std::thread::sleep(RETRY_DELAY + Duration::from_millis(jitter));
-                        }
-                    Err(err) => return Err(err.into()), // Convert the error into a boxed error
-                }
-            }
-        }
-        Ok(())
+    // Insert any remaining symbols in the batch with retry logic
+    if !symbol_batch.is_empty() {
+        log::info!("Inserting remaining symbols, count: {}", symbol_batch.len());
+        RaptorQProcessor::insert_symbols_with_retry(&mut conn, &symbol_batch)?;
+        // Get the underlying SQLite connection
+        let sqlite_conn: &rusqlite::Connection = &*conn;
+        // Execute a manual WAL checkpoint
+        let _: (i32, i32, i32) = sqlite_conn.query_row("PRAGMA wal_checkpoint;", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    }
+    log::info!("Insert worker function completed successfully.");
+    Ok(())
     }
 
     fn retrieve_original_file(conn: &Connection, original_file_hash: &str) -> Result<(String, f64, i32, Vec<u8>), rusqlite::Error> {
@@ -307,7 +319,6 @@ impl RaptorQProcessor {
         let input = Path::new(&path);
         let original_file_hash = self.compute_original_file_hash(&input)?;
         let (enc, repair_symbols) = self.get_encoder(input)?;
-    
         // Get the encoded packets and determine the actual total number of symbols
         log::info!("Getting the encoded packets and determining the actual total number of symbols...");
         let encoded_packets = enc.get_encoded_packets(repair_symbols);
@@ -358,9 +369,13 @@ impl RaptorQProcessor {
             .collect();
         log::info!("Inserting original file metadata...");
         tx_queue.send(WriteOperation::OriginalFile(original_file_metadata)).unwrap();
-        log::info!("Sending symbols to workers...");
+        log::info!("Sending symbols to insert worker(s)...");
         for symbol_data in symbols_and_files {
             tx_queue.send(WriteOperation::Symbol(symbol_data)).unwrap();
+        }
+        log::info!("Sending termination signal to insert worker(s)...");
+        for _ in 0..NUM_WORKERS {
+            tx_queue.send(WriteOperation::Terminate).unwrap();
         }
         log::info!("Waiting for workers to complete...");
         for worker in workers {
@@ -865,7 +880,6 @@ mod tests {
             // Initialize database
             let conn = RaptorQProcessor::initialize_db(TEST_DB_PATH)?;
 
-
             log::info!("Creating RaptorQProcessor now..."); 
             // Create processor
             let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();                        
@@ -894,7 +908,6 @@ mod tests {
             let symbols_to_fetch = ((1.0 / redundancy_factor) * 1.05 * metadata.source_symbols as f64).ceil() as usize;
             log::info!("Number of random decoding attempts: {}", attempts);
             log::info!("Number of symbols to fetch for decoding: {}", symbols_to_fetch);
-
             log::info!("Now attempting to recononstruct original file {} {} times...", STATIC_TEST_FILE, attempts);
             for attempt_number in 0..attempts {
                 log::info!("Attempt {}...", attempt_number);
@@ -905,17 +918,12 @@ mod tests {
                 let all_symbols: Result<Vec<Vec<u8>>, _> = stmt.query_map(params![&original_file_hash], |row| {
                     row.get(0)
                 })?.collect();
-                log::info!("Symbols queried: {:?}", all_symbols);
-        
                 // Unwrap the result or handle the error as needed
                 let all_symbols = all_symbols?;
-        
                 // Randomly select a subset of symbols
                 let mut rng = rand::thread_rng();
-                log::info!("Randomly selecting a subset of symbols...");
+                log::info!("Randomly selecting a subset of {} symbols...", symbols_to_fetch);
                 let selected_symbols: Vec<Vec<u8>> = all_symbols.choose_multiple(&mut rng, symbols_to_fetch).cloned().collect();
-                log::info!("Subset of symbols selected: {:?}", selected_symbols);
-
                 // Decode using the selected subset and verify
                 log::info!("Decoding using the selected subset and verifying...");
                 let decoded_file_data = processor.decode_with_selected_symbols(&selected_symbols, &metadata.encoder_parameters)?;
