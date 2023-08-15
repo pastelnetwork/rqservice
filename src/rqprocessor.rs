@@ -192,11 +192,13 @@ impl RaptorQProcessor {
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO rq_symbols (original_file_sha3_256_hash, rq_symbol_file_sha3_256_hash, rq_symbol_file_data, utc_datetime_symbol_file_created) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO rq_symbols (original_file_sha3_256_hash, rq_symbol_file_sha3_256_hash, rq_symbol_file_data, utc_datetime_symbol_file_created) VALUES (?1, ?2, ?3, ?4)",
             )?;
-    
             for (original_file_hash, symbol_hash, symbol_data, timestamp) in symbols.iter() {
-                stmt.execute(params![original_file_hash, symbol_hash, symbol_data, timestamp])?;
+                let rows_affected = stmt.execute(params![original_file_hash, symbol_hash, symbol_data, timestamp])?;
+                if rows_affected == 0 {
+                    log::info!("Symbol with hash {} already exists in the database. Skipping insertion.", symbol_hash);
+                }
             }
         }
         tx.commit()?;
@@ -246,7 +248,7 @@ impl RaptorQProcessor {
         mut conn: r2d2::PooledConnection<SqliteConnectionManager>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         const MAX_RETRIES: u32 = 5;
-        const BATCH_SIZE: usize = 5000;
+        const BATCH_SIZE: usize = 1000;
         const RETRY_DELAY: Duration = Duration::from_millis(50);
         let mut symbol_batch: Vec<(String, String, Vec<u8>, i64)> = Vec::with_capacity(BATCH_SIZE);
         log::info!("Insert worker started with settings: MAX_RETRIES = {}, BATCH_SIZE = {}, RETRY_DELAY = {:?}", MAX_RETRIES, BATCH_SIZE, RETRY_DELAY);
@@ -309,6 +311,15 @@ impl RaptorQProcessor {
         }
     }
 
+    fn original_file_exists(conn: &Connection, original_file_hash: &str) -> Result<bool, rusqlite::Error> {
+        let count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM original_files WHERE original_file_sha3_256_hash = ?1",
+            params![original_file_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn create_metadata_and_store(
         &self,
         path: &String,
@@ -318,6 +329,15 @@ impl RaptorQProcessor {
     ) -> Result<(EncoderMetaData, String), RqProcessorError> {
         let input = Path::new(&path);
         let original_file_hash = self.compute_original_file_hash(&input)?;
+
+        // Retrieve a connection from the pool
+        let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get()
+            .map_err(|err| RqProcessorError::new("create_metadata_and_store", "Failed to get connection from pool", err.to_string()))?;
+        // Check if the original file already exists in the database
+        if RaptorQProcessor::original_file_exists(&*conn, &original_file_hash)? {
+            log::info!("Original file already exists in the database: {}! Skipping it...", original_file_hash);
+            return Err(RqProcessorError::new("create_metadata_and_store", "Original file already exists in the database", original_file_hash));
+        }
         let (enc, repair_symbols) = self.get_encoder(input)?;
         // Get the encoded packets and determine the actual total number of symbols
         log::info!("Getting the encoded packets and determining the actual total number of symbols...");
@@ -901,6 +921,25 @@ mod tests {
             )?;
             log::info!("Metadata created and stored.");
 
+            // Attempt to create metadata and store again for the same file
+            log::info!("Attempting to create metadata and store again...");
+            let result = processor.create_metadata_and_store(
+                &input_test_file,
+                &"block_hash".to_string(),
+                &"pastel_id".to_string(),
+                &pool,
+            );
+
+            // Verify that the correct error message is returned
+            match result {
+                Err(RqProcessorError { func, msg, prev_msg: _ }) if func == "create_metadata_and_store" && msg.starts_with("Original file already exists") => {
+                    log::info!("Received expected error message: {}", msg);
+                }
+                _ => {
+                    panic!("Unexpected result when attempting to create metadata and store again: {:?}", result);
+                }
+            }
+            
             log::info!("source symbols = {}; repair symbols = {}", metadata.source_symbols, metadata.repair_symbols);
             // Number of random decoding attempts
             let attempts = 10;
