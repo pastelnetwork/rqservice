@@ -9,8 +9,8 @@ use std::path::Path;
 use std::fs::File;
 use std::time::Duration;
 use std::{fmt, fs, io};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use chrono::Utc;
 use serde_derive::{Deserialize, Serialize};
 use rusqlite::{Connection, params};
@@ -227,6 +227,10 @@ impl RaptorQProcessor {
                 WriteOperation::OriginalFile((original_file_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters)) => {
                     let mut retries = 0;
                     loop {
+                        log::info!("Attempting to acquire write lock now...");
+                        let _guard = WRITE_LOCK.lock().map_err(|err| {
+                            RqProcessorError::new("insert_worker_func", "Failed to acquire write lock", err.to_string())
+                        })?;
                         match conn.transaction() {
                             Ok(tx) => {
                                 RaptorQProcessor::insert_original_file(&tx, &original_file_hash, &original_file_path, original_file_size_in_mb, files_number, &block_hash, &pastel_id, &encoder_parameters)?;
@@ -303,28 +307,33 @@ impl RaptorQProcessor {
         let input = Path::new(&path);
         let original_file_hash = self.compute_original_file_hash(&input)?;
         let (enc, repair_symbols) = self.get_encoder(input)?;
-        let names_len = enc.get_encoded_packets(repair_symbols).len() as u32;
     
+        // Get the encoded packets and determine the actual total number of symbols
+        log::info!("Getting the encoded packets and determining the actual total number of symbols...");
+        let encoded_packets = enc.get_encoded_packets(repair_symbols);
+        let total_symbols = encoded_packets.len() as u32;
+        log::info!("Total symbols to insert: {}", total_symbols);
         log::info!("Preparing original file metadata");
         let original_file_metadata = (
             original_file_hash.clone(),
             path.clone(),
             input.metadata().ok().map_or(0.0, |m| m.len() as f64 / 1_000_000.0),
-            names_len as i32,
+            total_symbols as i32,
             block_hash.clone(),
             pastel_id.clone(),
             enc.get_config().serialize().to_vec(),
         );
-        log::info!("Original file metadata prepared: {:?}", original_file_metadata);
+        log::info!("Original file metadata prepared: {:?}, {:?}, {:?}, {:?}, {:?}", path, original_file_hash, total_symbols, pastel_id, block_hash);
         log::info!("Preparing symbols...");
+        let remaining_symbols = AtomicU32::new(total_symbols);
         let symbols_and_files: Vec<_> = {
-            let counter = AtomicUsize::new(0);
-            enc.get_encoded_packets(repair_symbols)
+            encoded_packets
                 .par_iter()
-                .map(|packet| {
-                    let index = counter.fetch_add(1, Ordering::Relaxed);
+                .enumerate()
+                .map(|(index, packet)| {
                     if index % 100 == 0 {
-                        log::info!("Processing symbol {} out of {}", index, repair_symbols);
+                        let remaining = remaining_symbols.fetch_sub(100, Ordering::Relaxed);
+                        log::info!("Remaining symbols to process: {} out of {}.", remaining, total_symbols);
                     }
                     (
                         original_file_hash.clone(),
@@ -335,7 +344,6 @@ impl RaptorQProcessor {
                 })
                 .collect()
         };
-    
         log::info!("Symbols prepared, now inserting...");
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
         let workers: Vec<_> = (0..NUM_WORKERS)
@@ -348,10 +356,8 @@ impl RaptorQProcessor {
                 })
             })
             .collect();
-            
         log::info!("Inserting original file metadata...");
         tx_queue.send(WriteOperation::OriginalFile(original_file_metadata)).unwrap();
-    
         log::info!("Sending symbols to workers...");
         for symbol_data in symbols_and_files {
             tx_queue.send(WriteOperation::Symbol(symbol_data)).unwrap();
@@ -360,12 +366,11 @@ impl RaptorQProcessor {
         for worker in workers {
             worker.join().expect("Worker thread panicked");
         }
-    
         log::info!("Original file metadata and symbols inserted successfully.");
         Ok(
             (EncoderMetaData {
                 encoder_parameters: enc.get_config().serialize().to_vec(),
-                source_symbols: names_len - repair_symbols,
+                source_symbols: total_symbols - repair_symbols,
                 repair_symbols},
             original_file_hash) // original_file_hash remains accessible here
         )
@@ -376,17 +381,12 @@ impl RaptorQProcessor {
         let input = Path::new(&path);
         let (enc, repair_symbols) = self.get_encoder(input)?;
         log::info!("Encoder obtained with {} repair symbols.", repair_symbols);
-    
         let original_file_hash = self.compute_original_file_hash(&input)?;
         log::info!("Original file hash computed: {}", original_file_hash);
-    
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
-        
         let encoded_symbols = enc.get_encoded_packets(repair_symbols);            
         log::info!("Symbols obtained for encoding.");
-    
         let timestamp = get_current_timestamp();
-    
         // Prepare symbol data for worker threads
         let symbol_data: Vec<_> = encoded_symbols.par_iter()
             .map(|symbol| {
@@ -395,12 +395,10 @@ impl RaptorQProcessor {
                 WriteOperation::Symbol((original_file_hash.clone(), name, pkt, timestamp))
             })
             .collect();
-    
         // Send symbol data to worker threads
         for data in symbol_data {
             tx_queue.send(data).unwrap();
         }
-                
         // Launch worker threads to handle the insertion of symbols
         let workers: Vec<_> = (0..NUM_WORKERS)
             .map(|_| {
@@ -413,14 +411,11 @@ impl RaptorQProcessor {
                 })
             })
             .collect();
-    
         // Wait for worker threads to complete
         for worker in workers {
             worker.join().expect("Worker thread panicked")?;
         }
-                        
         log::info!("Symbols inserted successfully.");
-    
         Ok(
             (EncoderMetaData {
                 encoder_parameters: enc.get_config().serialize().to_vec(),
@@ -435,37 +430,29 @@ impl RaptorQProcessor {
         if encoder_parameters.len() != 12 {
             return Err(RqProcessorError::new("decode", "encoder_parameters length must be 12", "".to_string()));
         }
-    
         let (original_file_path, _, _, _) = Self::retrieve_original_file(conn, original_file_hash)?;
-    
         let mut cfg = [0u8; 12];
         cfg.copy_from_slice(encoder_parameters);
         let config = ObjectTransmissionInformation::deserialize(&cfg);
         let mut dec = Decoder::new(config);
-    
         let mut stmt = conn.prepare("SELECT rq_symbol_file_data FROM rq_symbols WHERE original_file_sha3_256_hash = ?1")
             .map_err(|err| RqProcessorError::new("decode", "Cannot prepare statement", err.to_string()))?;
-    
         let symbol_rows = stmt.query_map(params![original_file_hash], |row| Ok(row.get(0)?))
             .map_err(|err| RqProcessorError::new("decode", "Cannot query symbols", err.to_string()))?;
-    
         // Deserialize symbols into EncodingPacket objects and add them to the decoder
         for symbol_row in symbol_rows {
             let symbol_data: Vec<u8> = symbol_row.map_err(|err| RqProcessorError::new("decode", "Cannot process symbols", err.to_string()))?;
             let symbol_packet = EncodingPacket::deserialize(&symbol_data);
             dec.add_new_packet(symbol_packet);
         }
-    
         // Retrieve the result
         let result = dec.get_result().ok_or_else(|| RqProcessorError::new("decode", "Decoding failed", "".to_string()))?;
-    
         // Write decoded content to a file
         let output_path = format!("{}_decoded", original_file_path);
         let output_path_as_path = Path::new(&output_path); // Convert the string to a Path
         let mut file = File::create(&output_path_as_path)
             .map_err(|err| RqProcessorError::new_file_err("decode", "Cannot create output file", &output_path_as_path, err.to_string()))?;
         file.write_all(&result)?;
-    
         Ok(output_path)
     }
 
@@ -687,26 +674,20 @@ mod tests {
     
     // Utility Functions
     fn setup_pool() -> Pool<SqliteConnectionManager> {
-        let _guard = TEST_MUTEX.lock().unwrap();
         log::info!("Attempting to open Sqlite Pool for TEST_DB_PATH at path: {}", TEST_DB_PATH); 
         let manager = SqliteConnectionManager::file(TEST_DB_PATH); // Use the test database path
         Pool::new(manager).expect("Failed to create pool.")
     }
 
-
     fn test_meta(pool: &Pool<SqliteConnectionManager>, path: String, size: u32) -> Result<(EncoderMetaData, String), TestError> {
         log::info!("Testing file {}", path);
         let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
-
         let encode_time = Instant::now();
-
         match processor.create_metadata_and_store(&path, &String::from("12345"), &String::from("67890"), pool) {
                 Ok((meta, path)) => {
                 log::info!("source symbols = {}; repair symbols = {}", meta.source_symbols, meta.repair_symbols);
-    
                 let source_symbols = (size as f64 / 50_000.0f64).ceil() as u32;
                 assert_eq!(meta.source_symbols, source_symbols);
-    
                 log::info!("{:?} spent to create symbols", encode_time.elapsed());
                 Ok((meta, path))
             }
@@ -720,9 +701,7 @@ mod tests {
     fn test_encode(pool: &Pool<SqliteConnectionManager>, path: String, size: u32) -> Result<(EncoderMetaData, String), TestError> {
         log::info!("Testing file {}", path);
         let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
-
         let encode_time = Instant::now(); // Define the encode_time variable here
-
         match processor.encode(&path, pool) {
             Ok((meta, db_path)) => {
                 log::info!("source symbols = {}; repair symbols = {}", meta.source_symbols, meta.repair_symbols);
@@ -739,7 +718,6 @@ mod tests {
         let conn = pool.get().expect("Failed to get connection from pool.");
         log::info!("Testing file with original hash {}", original_file_hash);
         let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
-
         match processor.decode(&conn, encoder_parameters, original_file_hash) {
             Ok(output_path) => {
                 log::info!("Restored file path: {}", output_path);
@@ -867,7 +845,6 @@ mod tests {
         #[test]
         #[serial]
         fn test_rqprocessor() -> Result<(), Box<dyn std::error::Error>> {
-            let _guard = TEST_MUTEX.lock().unwrap();
             initialize_database(TEST_DB_PATH).unwrap();
 
             setup();
@@ -902,7 +879,6 @@ mod tests {
             log::info!("Creating metadata and storing...");
             let pool = setup_pool();
             log::info!("Pool created.");
-            log::info!("Creating metadata and storing...");
             let (metadata, _db_path) = processor.create_metadata_and_store(
                 &input_test_file,
                 &"block_hash".to_string(),
