@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use chrono::Utc;
 use serde_derive::{Deserialize, Serialize};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, ToSql};
 use rayon::prelude::*;
 use rand::Rng;
 use lazy_static::lazy_static;
@@ -302,7 +302,7 @@ impl RaptorQProcessor {
     }
 
     fn retrieve_original_file(conn: &Connection, original_file_hash: &str) -> Result<(String, f64, i32, Vec<u8>), rusqlite::Error> {
-        let mut stmt = conn.prepare("SELECT original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters FROM original_files WHERE original_file_sha3_256_hash = ?1")?;
+        let mut stmt = conn.prepare("SELECT original_file_path, original_file_size_in_mb, files_number, encoder_parameters FROM original_files WHERE original_file_sha3_256_hash = ?1")?;
         let mut rows = stmt.query(params![original_file_hash])?;
         if let Some(row) = rows.next()? {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
@@ -329,7 +329,6 @@ impl RaptorQProcessor {
     ) -> Result<(EncoderMetaData, String), RqProcessorError> {
         let input = Path::new(&path);
         let original_file_hash = self.compute_original_file_hash(&input)?;
-
         // Retrieve a connection from the pool
         let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get()
             .map_err(|err| RqProcessorError::new("create_metadata_and_store", "Failed to get connection from pool", err.to_string()))?;
@@ -490,8 +489,8 @@ impl RaptorQProcessor {
         file.write_all(&result)?;
         Ok(output_path)
     }
-
-    pub fn decode_with_selected_symbols(&self, selected_symbols: &[Vec<u8>], encoder_parameters: &Vec<u8>) -> Result<Vec<u8>, RqProcessorError> {
+    
+    pub fn decode_with_selected_symbols(&self, conn: &Connection, selected_symbol_hashes: &[String], encoder_parameters: &Vec<u8>) -> Result<Vec<u8>, RqProcessorError> {
         if encoder_parameters.len() != 12 {
             return Err(RqProcessorError::new("decode_with_selected_symbols", "encoder_parameters length must be 12", "".to_string()));
         }
@@ -499,8 +498,23 @@ impl RaptorQProcessor {
         cfg.copy_from_slice(encoder_parameters);
         let config = ObjectTransmissionInformation::deserialize(&cfg);
         let mut dec = Decoder::new(config);
+        // Create placeholders for the query based on the number of selected hashes
+        let placeholders: String = selected_symbol_hashes.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
+        let sql_query = format!(
+            "SELECT rq_symbol_file_data FROM rq_symbols WHERE rq_symbol_file_hash IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql_query)
+        .map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot prepare statement", err.to_string()))?;
+        // Create a vector of parameters to bind
+        let params: Vec<&dyn ToSql> = selected_symbol_hashes.iter().map(|x| x as &dyn ToSql).collect();
+        // Execute the query with the bound parameters
+        let symbol_rows = stmt.query_map(&*params, |row| Ok(row.get::<_, Vec<u8>>(0)?))
+        .map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot query symbols", err.to_string()))?;
+    
         // Deserialize symbols into EncodingPacket objects and add them to the decoder
-        for symbol_data in selected_symbols {
+        for symbol_row in symbol_rows {
+            let symbol_data: Vec<u8> = symbol_row.map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot process symbols", err.to_string()))?;
             let symbol_packet = EncodingPacket::deserialize(&symbol_data);
             dec.add_new_packet(symbol_packet);
         }
@@ -508,7 +522,7 @@ impl RaptorQProcessor {
         let result = dec.get_result().ok_or_else(|| RqProcessorError::new("decode_with_selected_symbols", "Decoding failed", "".to_string()))?;
         Ok(result)
     }
-
+    
     fn get_encoder(&self, path: &Path) -> Result<(Encoder, u32), RqProcessorError> {
         let mut file = match File::open(&path) {
             Ok(file) => file,
@@ -940,32 +954,45 @@ mod tests {
                 }
             }
             
-            log::info!("source symbols = {}; repair symbols = {}", metadata.source_symbols, metadata.repair_symbols);
+            //__________________________________________________________________________________ Decoding phase:
+            log::info!("First attempting to decode using ALL generated RQ symbol files...");
+            // Debugging step: Decode using all symbols
+            log::info!("Now attempting to decode original file using all symbols and verifying...");
+            let decoded_file_path = processor.decode(&conn, &metadata.encoder_parameters, &original_file_hash)?;
+            let decoded_file_data_all_symbols = fs::read(&decoded_file_path)?;
+            let decoded_file_hash_all_symbols = sha3_256_hash(&decoded_file_data_all_symbols);
+            log::info!("Decoded file hash (all symbols): {}", decoded_file_hash_all_symbols);
+            assert_eq!(original_file_hash, decoded_file_hash_all_symbols, "Reconstructed file hash does not match original file hash using all symbols");
+            log::info!("Reconstructed file hash matches original file hash using the decode method!");
+            
+            log::info!("Now attempting to decode original file using a random subset of RQ symbol files...");
             // Number of random decoding attempts
             let attempts = 10;
             // Number of symbols to fetch for decoding
             let symbols_to_fetch = ((1.0 / redundancy_factor) * 1.05 * metadata.source_symbols as f64).ceil() as usize;
             log::info!("Number of random decoding attempts: {}", attempts);
             log::info!("Number of symbols to fetch for decoding: {}", symbols_to_fetch);
-            log::info!("Now attempting to recononstruct original file {} {} times...", STATIC_TEST_FILE, attempts);
+            log::info!("Now attempting to reconstruct original file {} {} times...", STATIC_TEST_FILE, attempts);
             for attempt_number in 0..attempts {
                 log::info!("Attempt {}...", attempt_number);
-                // Prepare the statement
-                let mut stmt = conn.prepare("SELECT rq_symbol_file_data FROM rq_symbols WHERE original_file_sha3_256_hash = ?1")?;
+                // Prepare the statement to select symbol hashes
+                
+                let mut stmt = conn.prepare("SELECT rq_symbol_file_sha3_256_hash FROM rq_symbols WHERE original_file_sha3_256_hash = ?1")?;
                 log::info!("Statement prepared: {:?}", stmt);
-                // Query the symbols with the original file hash
-                let all_symbols: Result<Vec<Vec<u8>>, _> = stmt.query_map(params![&original_file_hash], |row| {
+                // Query the symbol hashes with the original file hash
+                let all_symbol_hashes: Result<Vec<String>, _> = stmt.query_map(params![&original_file_hash], |row| {
                     row.get(0)
                 })?.collect();
                 // Unwrap the result or handle the error as needed
-                let all_symbols = all_symbols?;
-                // Randomly select a subset of symbols
+                let all_symbol_hashes = all_symbol_hashes?;
+                // Randomly select a subset of symbol hashes
                 let mut rng = rand::thread_rng();
-                log::info!("Randomly selecting a subset of {} symbols...", symbols_to_fetch);
-                let selected_symbols: Vec<Vec<u8>> = all_symbols.choose_multiple(&mut rng, symbols_to_fetch).cloned().collect();
-                // Decode using the selected subset and verify
-                log::info!("Decoding using the selected subset and verifying...");
-                let decoded_file_data = processor.decode_with_selected_symbols(&selected_symbols, &metadata.encoder_parameters)?;
+                log::info!("Randomly selecting a subset of {} symbol hashes...", symbols_to_fetch);
+                let selected_symbol_hashes: Vec<String> = all_symbol_hashes.choose_multiple(&mut rng, symbols_to_fetch).cloned().collect();
+                log::info!("Selected symbol hash count versus symbols_to_fetch: {} vs {}", selected_symbol_hashes.len(), symbols_to_fetch);
+                // Decode using the selected subset of symbol hashes and verify
+                log::info!("Now attempting to decode using the selected subset and verifying...");
+                let decoded_file_data = processor.decode_with_selected_symbols(&conn, &selected_symbol_hashes, &metadata.encoder_parameters)?;
                 let decoded_file_hash = sha3_256_hash(&decoded_file_data);
                 log::info!("Decoded file hash: {}", decoded_file_hash);
                 log::info!("Original file hash: {}", original_file_hash);
@@ -973,7 +1000,7 @@ mod tests {
                 assert_eq!(original_file_hash, decoded_file_hash, "Reconstructed file hash does not match original file hash");
                 log::info!("Reconstructed file hash matches original file hash! Trying again...");
             }
-        
+            
             log::info!("All attempts successful!");
             log::info!("Cleaning up...");
             // Clean up (optional)
@@ -983,6 +1010,6 @@ mod tests {
             fs::remove_file(TEST_DB_PATH)?;
             log::info!("Clean up complete!");
             Ok(())
-        }
+        }            
 }
 }
