@@ -5,6 +5,7 @@
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use sha3::{Digest, Sha3_256};
 use std::io::prelude::*;
+use std::io::BufReader;
 use std::path::Path;
 use std::fs::File;
 use std::time::Duration;
@@ -399,6 +400,7 @@ impl RaptorQProcessor {
         log::info!("Original file metadata prepared: {:?}, {:?}, {:?}, {:?}, {:?}", path, original_file_hash, total_symbols, pastel_id, block_hash);
         log::info!("Preparing symbols...");
         let remaining_symbols = AtomicU32::new(total_symbols);
+        let original_file_hash_ref = &original_file_hash;
         let symbols_and_files: Vec<_> = {
             encoded_packets
                 .par_iter()
@@ -409,7 +411,7 @@ impl RaptorQProcessor {
                         log::info!("Remaining symbols to process: {} out of {}.", remaining, total_symbols);
                     }
                     (
-                        original_file_hash.clone(),
+                        original_file_hash_ref.clone(), // Use the reference here
                         RaptorQProcessor::symbols_id(&packet.serialize()),
                         packet.serialize(),
                         get_current_timestamp(),
@@ -461,7 +463,7 @@ impl RaptorQProcessor {
         let original_file_hash = self.compute_original_file_hash(&input)?;
         log::info!("Original file hash computed: {}", original_file_hash);
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
-        let encoded_symbols = enc.get_encoded_packets(repair_symbols);            
+        let encoded_symbols: Vec<EncodingPacket> = enc.get_encoded_packets(repair_symbols);            
         log::info!("Symbols obtained for encoding.");
         let timestamp = get_current_timestamp();
         // Prepare symbol data for worker threads
@@ -575,41 +577,25 @@ impl RaptorQProcessor {
     }
     
     fn get_encoder(&self, path: &Path) -> Result<(Encoder, u32), RqProcessorError> {
-        let mut file = match File::open(&path) {
-            Ok(file) => file,
-            Err(err) => {
-                return Err(RqProcessorError::new_file_err("get_encoder",
-                    "Cannot open file",
-                    path,
-                    err.to_string()));
-            }
-        };
-        let source_size = match file.metadata() {
-            Ok(metadata) => metadata.len(),
-            Err(err) => {
-                return Err(RqProcessorError::new_file_err("get_encoder",
-                    "Cannot access metadata of file",
-                    path,
-                    err.to_string()));
-            }
-        };
-        let config = ObjectTransmissionInformation::with_defaults(
-            source_size,
-            self.symbol_size,
-        );
+        // Open the file
+        let file = File::open(&path).map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot open file", path, err.to_string()))?;
+        
+        // Wrap it in a buffered reader
+        let mut reader = BufReader::new(file);
+    
+        // Get the source size
+        let source_size = reader.get_ref().metadata().map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot access metadata of file", path, err.to_string()))?.len();
+    
+        // Read the file data
         let mut data = Vec::new();
-        match file.read_to_end(&mut data) {
-            Ok(_) => Ok((Encoder::new(&data, config),
-                RaptorQProcessor::repair_symbols_num(self.symbol_size,
-                    self.redundancy_factor,
-                    source_size))),
-            Err(err) => {
-                Err(RqProcessorError::new_file_err("get_encoder",
-                    "Cannot read input file",
-                    path,
-                    err.to_string()))
-            }
-        }
+        reader.read_to_end(&mut data).map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot read input file", path, err.to_string()))?;
+    
+        // Create the encoder
+        let config = ObjectTransmissionInformation::with_defaults(source_size, self.symbol_size);
+        let encoder = Encoder::new(&data, config);
+        let repair_symbols = RaptorQProcessor::repair_symbols_num(self.symbol_size, self.redundancy_factor, source_size);
+    
+        Ok((encoder, repair_symbols))
     }
 
     fn repair_symbols_num(symbol_size: u16, redundancy_factor: u8, data_len: u64) -> u32 {
@@ -912,6 +898,8 @@ mod tests {
         use rand::Rng;
         use std::fs;
         use rand::prelude::SliceRandom;
+        use std::time::Instant;
+
 
         const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
         const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
@@ -945,6 +933,8 @@ mod tests {
         #[test]
         #[serial]
         fn test_rqprocessor() -> Result<(), Box<dyn std::error::Error>> {
+                    
+            let start_time = Instant::now(); // Mark the start time
             initialize_database(TEST_DB_PATH).unwrap();
 
             setup();
@@ -1058,15 +1048,16 @@ mod tests {
                 assert_eq!(original_file_hash, decoded_file_hash, "Reconstructed file hash does not match original file hash");
                 log::info!("Reconstructed file hash matches original file hash! Trying again...");
             }
-            
             log::info!("All attempts successful!");
             log::info!("Cleaning up...");
             // Clean up (optional)
             if !Path::new(STATIC_TEST_FILE).exists() {
                 fs::remove_file(input_test_file)?;
             }
-            fs::remove_file(TEST_DB_PATH)?;
+            // fs::remove_file(TEST_DB_PATH)?;
             log::info!("Clean up complete!");
+            let elapsed_time = start_time.elapsed();  // Calculate the elapsed time
+            log::info!("End-to-End Test total execution time: {:?}", elapsed_time);
             Ok(())
         }            
 }
