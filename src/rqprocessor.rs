@@ -11,7 +11,7 @@ use std::time::Duration;
 use std::{fmt, fs, io};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use serde_derive::{Deserialize, Serialize};
 use rusqlite::{Connection, params, ToSql};
 use rayon::prelude::*;
@@ -24,6 +24,8 @@ use toml;
 lazy_static! {
     static ref WRITE_LOCK: Mutex<()> = Mutex::new(());
 }
+
+const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 30; // Adjust as needed
 pub const NUM_WORKERS: usize = 1;
 pub const DB_PATH: &str = crate::DB_PATH;
 pub const RQ_CONFIG_PATH: &str = "/home/ubuntu/rqservice/examples/rqconfig.toml";
@@ -183,6 +185,47 @@ impl RaptorQProcessor {
         )?;
         log::info!("Database initialization complete");
         Ok(conn)
+    }
+
+    pub fn db_maintenance_func(&self, conn: &Connection) -> Result<(), rusqlite::Error> {
+        // Calculate the threshold date
+        let threshold_date = Utc::now() - ChronoDuration::days(MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED);
+
+        // Convert the threshold date to a suitable format for your database, e.g., a timestamp or string
+        let threshold_timestamp = threshold_date.timestamp(); // If using a timestamp in the database
+
+        // Find original file hashes with outdated symbols
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT original_file_sha3_256_hash FROM rq_symbols WHERE utc_datetime_symbol_file_created < ?1",
+        )?;
+        let original_hashes_to_check: Vec<String> = stmt.query_map(params![threshold_timestamp], |row| row.get(0))?.collect::<Result<_, _>>()?;
+
+        for original_hash in &original_hashes_to_check {
+            // Delete outdated symbols
+            conn.execute(
+                "DELETE FROM rq_symbols WHERE original_file_sha3_256_hash = ?1 AND utc_datetime_symbol_file_created < ?2",
+                params![original_hash, threshold_timestamp],
+            )?;
+            log::info!("Deleted outdated symbols for original file hash: {}", original_hash);
+
+            // Check if there are any symbols left for this original file hash
+            let symbols_left: i32 = conn.query_row(
+                "SELECT COUNT(*) FROM rq_symbols WHERE original_file_sha3_256_hash = ?1",
+                params![original_hash],
+                |row| row.get(0),
+            )?;
+
+            // If no symbols left, delete entry from original_files table
+            if symbols_left == 0 {
+                conn.execute(
+                    "DELETE FROM original_files WHERE original_file_sha3_256_hash = ?1",
+                    params![original_hash],
+                )?;
+                log::info!("Deleted original file entry for hash: {}", original_hash);
+            }
+        }
+
+        Ok(())
     }
 
     fn insert_symbols_batch(
