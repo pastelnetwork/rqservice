@@ -482,8 +482,15 @@ impl RaptorQProcessor {
         // Retrieve the result
         let result = dec.get_result().ok_or_else(|| RqProcessorError::new("decode", "Decoding failed", "".to_string()))?;
         // Write decoded content to a file
-        let output_path = format!("{}_decoded", original_file_path);
-        let output_path_as_path = Path::new(&output_path); // Convert the string to a Path
+        let original_file_name = Path::new(&original_file_path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("");
+        let reconstructed_dir = "reconstructed_files";
+        let output_path = format!("{}/{}", reconstructed_dir, original_file_name);
+        let output_path_as_path = Path::new(&output_path);
+        // Create the directory if it doesn't exist
+        std::fs::create_dir_all(reconstructed_dir)?;
         let mut file = File::create(&output_path_as_path)
             .map_err(|err| RqProcessorError::new_file_err("decode", "Cannot create output file", &output_path_as_path, err.to_string()))?;
         file.write_all(&result)?;
@@ -501,9 +508,10 @@ impl RaptorQProcessor {
         // Create placeholders for the query based on the number of selected hashes
         let placeholders: String = selected_symbol_hashes.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
         let sql_query = format!(
-            "SELECT rq_symbol_file_data FROM rq_symbols WHERE rq_symbol_file_hash IN ({})",
+            "SELECT rq_symbol_file_data FROM rq_symbols WHERE rq_symbol_file_sha3_256_hash IN ({})",
             placeholders
         );
+
         let mut stmt = conn.prepare(&sql_query)
         .map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot prepare statement", err.to_string()))?;
         // Create a vector of parameters to bind
@@ -968,15 +976,22 @@ mod tests {
             log::info!("Now attempting to decode original file using a random subset of RQ symbol files...");
             // Number of random decoding attempts
             let attempts = 10;
-            // Number of symbols to fetch for decoding
-            let symbols_to_fetch = ((1.0 / redundancy_factor) * 1.05 * metadata.source_symbols as f64).ceil() as usize;
+            // Read the original file size in kilobytes
+            let original_file_size_kb = input_test_file_data.len() as f64 / 1024.0;
+            // Extract the symbol size in kilobytes
+            let symbol_size_kb = config.symbol_size as f64 / 1024.0;
+            // Redundancy factor
+            let redundancy_factor = config.redundancy_factor as f64;
+            // Calculate the number of source symbols required
+            let source_symbols = (original_file_size_kb / symbol_size_kb).ceil() as usize;
+            // Calculate the number of symbols to fetch, including redundancy
+            let symbols_to_fetch = (redundancy_factor * source_symbols as f64).ceil() as usize;
             log::info!("Number of random decoding attempts: {}", attempts);
             log::info!("Number of symbols to fetch for decoding: {}", symbols_to_fetch);
             log::info!("Now attempting to reconstruct original file {} {} times...", STATIC_TEST_FILE, attempts);
             for attempt_number in 0..attempts {
                 log::info!("Attempt {}...", attempt_number);
                 // Prepare the statement to select symbol hashes
-                
                 let mut stmt = conn.prepare("SELECT rq_symbol_file_sha3_256_hash FROM rq_symbols WHERE original_file_sha3_256_hash = ?1")?;
                 log::info!("Statement prepared: {:?}", stmt);
                 // Query the symbol hashes with the original file hash
