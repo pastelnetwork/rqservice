@@ -16,8 +16,8 @@ use std::thread;
 use chrono::{Utc, Duration as ChronoDuration};
 use rqprocessor::RaptorQProcessor;
 
-// pub const DB_PATH: &str = "/home/ubuntu/.pastel/testnet3/rq_symbols.sqlite";
-pub const DB_PATH: &str = "/home/ubuntu/rqservice/test_files/rq_symbols.sqlite";
+pub const DB_PATH: &str = "/home/ubuntu/.pastel/testnet3/rq_symbols.sqlite";
+// pub const DB_PATH: &str = "/home/ubuntu/rqservice/test_files/rq_symbols.sqlite";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,14 +31,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .append()
         .write_mode(WriteMode::Async)
+        .log_to_stdout() // Add this line to also log to stdout
         .start()?;
 
+    log::info!("Now starting RQ-Service...");
     // Initialize the database
-    rqprocessor::initialize_database(DB_PATH).unwrap();
 
+    log::info!("Initializing RQ-Service database...");
+    rqprocessor::initialize_database(DB_PATH).unwrap();
+    log::info!("Creating database pool...");
     let manager = SqliteConnectionManager::file(rqprocessor::DB_PATH);
     let pool = Arc::new(Pool::new(manager).expect("Failed to create pool."));
 
+    log::info!("Creating RaptorQ Processor instance...");
     // Create the RaptorQProcessor instance
     let rq_processor = RaptorQProcessor::new(DB_PATH)?;
 
@@ -47,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn a background thread to run the maintenance task
     thread::spawn(move || {
-        let cron_expression = "0 3 * * *"; // Run daily at 3:00 AM
+        let cron_expression = "0 0 3 * * *"; // Run daily at 3:00 AM
         let schedule = Schedule::from_str(cron_expression).unwrap();
 
         // Iterate over the schedule to execute the task
@@ -67,8 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-
+    log::info!("Starting RQ-Service server...");
     rqserver::start_server(&settings, &pool).await?;
+    log::info!("RQ-Service server started, listening for requests...");
 
     Ok(())
 }
