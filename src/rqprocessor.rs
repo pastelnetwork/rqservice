@@ -380,7 +380,7 @@ impl RaptorQProcessor {
         }
         // Open the file to get metadata
         let file = File::open(&input)?;
-        let source_size = file.metadata()?.len();
+        let source_size: u64 = file.metadata()?.len();
         let enc = self.get_encoder(input)?; // Get the encoder using the new get_encoder method
         let enc_config = enc.get_config().serialize().to_vec(); // Serialize the configuration
         let total_repair_symbols = RaptorQProcessor::repair_symbols_num(self.symbol_size, self.redundancy_factor, source_size);
@@ -458,7 +458,7 @@ impl RaptorQProcessor {
             EncoderMetaData {
                 encoder_parameters: enc_config, // Use the serialized configuration extracted earlier
                 source_symbols: (source_size as u32) / (self.symbol_size as u32), // Calculating source symbols based on file size
-                repair_symbols: total_repair_symbols, // Using the total repair symbols calculated earlier
+                repair_symbols: total_repair_symbols - (source_size as u32) / (self.symbol_size as u32) // We adjust the repair symbols count here to reflect the actual number of repair symbols generated beyond the source symbols
             },
             original_file_hash,
         ))
@@ -600,15 +600,11 @@ impl RaptorQProcessor {
     }
     
     fn repair_symbols_num(symbol_size: u16, redundancy_factor: u8, data_len: u64) -> u32 {
-        if data_len <= symbol_size as u64 {
-            redundancy_factor as u32
-        } else {
-            (data_len as f64 *
-                (f64::from(redundancy_factor) - 1.0) /
-                f64::from(symbol_size)).ceil() as u32
-        }
+        let source_symbols = (data_len as f64 / symbol_size as f64).ceil();
+        let repair_symbols = (source_symbols * redundancy_factor as f64).ceil() as u32;
+        repair_symbols
     }
-
+    
     fn symbols_id(symbol: &Vec<u8>) -> String {
         let mut hasher = Sha3_256::new();
         hasher.update(symbol);
@@ -903,8 +899,8 @@ mod tests {
 
 
         const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
-        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
-        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
+        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
+        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
 
 
         fn generate_test_file() -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
