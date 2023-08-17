@@ -24,7 +24,7 @@ lazy_static! {
     static ref WRITE_LOCK: Mutex<()> = Mutex::new(());
 }
 
-const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 30; // Adjust as needed
+const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 2; // Adjust as needed
 pub const NUM_WORKERS: usize = 1;
 pub const ORIGINAL_FILE_LOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 pub const DB_PATH: &str = crate::DB_PATH;
@@ -133,16 +133,16 @@ impl RaptorQProcessor {
         log::info!("Initializing database at path: {}", path);
         let conn = Connection::open(path)?;
         let desired_page_size = 65536;
-        log::info!("Querying current page size");
+        log::debug!("Querying current page size");
         let current_page_size: i32 = conn.query_row("PRAGMA page_size;", params![], |row| row.get(0))?;
         if current_page_size != desired_page_size {
-            log::info!("Setting page size to {}", desired_page_size);
+            log::debug!("Setting page size to {}", desired_page_size);
             conn.execute_batch(&format!("PRAGMA page_size = {};", desired_page_size))?;
             conn.execute_batch("VACUUM;")?;
         }
         macro_rules! set_pragma_if_different {
             ($pragma:expr, $value:expr) => {
-                log::info!("Checking PRAGMA {}: current value", $pragma);
+                log::debug!("Checking PRAGMA {}: current value", $pragma);
                 let current_value: String = conn.query_row(&format!("PRAGMA {};", $pragma), params![], |row| {
                     let value_as_i32: Result<i32, _> = row.get(0);
                     match value_as_i32 {
@@ -151,7 +151,7 @@ impl RaptorQProcessor {
                     }
                 })?;
                 if current_value != $value {
-                    log::info!("Setting PRAGMA {} = {}", $pragma, $value);
+                    log::debug!("Setting PRAGMA {} = {}", $pragma, $value);
                     conn.execute_batch(&format!("PRAGMA {} = {};", $pragma, $value))?;
                 }
             };
@@ -161,7 +161,7 @@ impl RaptorQProcessor {
         set_pragma_if_different!("cache_size", "-524288");
         set_pragma_if_different!("busy_timeout", "2000");
         set_pragma_if_different!("wal_autocheckpoint", "100");
-        log::info!("Creating tables");
+        log::debug!("Creating tables");
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rq_symbols (
                 original_file_sha3_256_hash TEXT,
@@ -183,7 +183,7 @@ impl RaptorQProcessor {
             )",
             params![],
         )?;
-        log::info!("Database initialization complete");
+        log::debug!("Database initialization complete");
         Ok(conn)
     }
 
@@ -338,7 +338,7 @@ impl RaptorQProcessor {
         // Get the underlying SQLite connection
         let sqlite_conn: &rusqlite::Connection = &*conn;
         // Execute a manual WAL checkpoint
-        let _: (i32, i32, i32) = sqlite_conn.query_row("PRAGMA wal_checkpoint;", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let _: (i32, i32, i32) = sqlite_conn.query_row("PRAGMA wal_checkpoint(FULL);", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
     }
     log::info!("Insert worker function completed successfully.");
     Ok(())
@@ -471,7 +471,7 @@ impl RaptorQProcessor {
         let repair_symbols = RaptorQProcessor::repair_symbols_num(self.symbol_size, self.redundancy_factor, input.metadata().unwrap().len());
         log::info!("Encoder obtained with {} repair symbols.", repair_symbols);
         let original_file_hash = self.compute_original_file_hash(&input)?;
-        log::info!("Original file hash computed: {}", original_file_hash);
+        log::info!("Original file hash computed in encoder: {}", original_file_hash);
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
         let encoded_symbols: Vec<EncodingPacket> = enc.get_encoded_packets(repair_symbols);
         log::info!("Symbols obtained for encoding.");
@@ -500,11 +500,19 @@ impl RaptorQProcessor {
                 })
             })
             .collect();
+        log::info!("Sending termination signal to insert worker(s)...");
+        for _ in 0..NUM_WORKERS {
+            tx_queue.send(WriteOperation::Terminate).unwrap();
+        }
         // Wait for worker threads to complete
         for worker in workers {
             worker.join().expect("Worker thread panicked")?;
         }
         log::info!("Symbols inserted successfully.");
+        // Get a connection from the pool
+        let conn = pool.get().expect("Failed to get connection from pool.");
+        // Execute a manual WAL checkpoint
+        let _: (i32, i32, i32) = conn.query_row("PRAGMA wal_checkpoint(FULL);", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         Ok(
             (EncoderMetaData {
                 encoder_parameters: enc.get_config().serialize().to_vec(),
@@ -519,6 +527,7 @@ impl RaptorQProcessor {
         if encoder_parameters.len() != 12 {
             return Err(RqProcessorError::new("decode", "encoder_parameters length must be 12", "".to_string()));
         }
+        log::info!("Using original file hash in decoder: {}", original_file_hash);
         let (original_file_path, _, _, _) = Self::retrieve_original_file(conn, original_file_hash)?;
         let mut cfg = [0u8; 12];
         cfg.copy_from_slice(encoder_parameters);
@@ -541,15 +550,16 @@ impl RaptorQProcessor {
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("");
-        let reconstructed_dir = "reconstructed_files";
-        let output_path = format!("{}/{}", reconstructed_dir, original_file_name);
-        let output_path_as_path = Path::new(&output_path);
+        let reconstructed_dir = Path::new("reconstructed_files").canonicalize().unwrap_or_else(|_| std::path::PathBuf::from("reconstructed_files"));
+        let output_path_buf = reconstructed_dir.join(original_file_name);
         // Create the directory if it doesn't exist
-        std::fs::create_dir_all(reconstructed_dir)?;
-        let mut file = File::create(&output_path_as_path)
-            .map_err(|err| RqProcessorError::new_file_err("decode", "Cannot create output file", &output_path_as_path, err.to_string()))?;
+        std::fs::create_dir_all(&reconstructed_dir)?;
+        let mut file = File::create(&output_path_buf)
+            .map_err(|err| RqProcessorError::new_file_err("decode", "Cannot create output file", &output_path_buf, err.to_string()))?;
         file.write_all(&result)?;
-        Ok(output_path)
+        // Convert PathBuf to String
+        let output_path_string = output_path_buf.to_string_lossy().into_owned();
+        Ok(output_path_string)
     }
 
     pub fn decode_with_selected_symbols(&self, conn: &Connection, selected_symbol_hashes: &[String], encoder_parameters: &Vec<u8>) -> Result<Vec<u8>, RqProcessorError> {
@@ -899,8 +909,8 @@ mod tests {
 
 
         const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
-        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
-        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
+        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
+        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
 
 
         fn generate_test_file() -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
