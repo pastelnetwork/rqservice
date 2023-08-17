@@ -5,13 +5,11 @@
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use sha3::{Digest, Sha3_256};
 use std::io::prelude::*;
-use std::io::BufReader;
 use std::path::Path;
 use std::fs::File;
 use std::time::Duration;
 use std::{fmt, fs, io};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_derive::{Deserialize, Serialize};
 use rusqlite::{Connection, params, ToSql};
@@ -28,6 +26,7 @@ lazy_static! {
 
 const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 30; // Adjust as needed
 pub const NUM_WORKERS: usize = 1;
+pub const ORIGINAL_FILE_LOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 pub const DB_PATH: &str = crate::DB_PATH;
 pub const RQ_CONFIG_PATH: &str = "/home/ubuntu/rqservice/examples/rqconfig.toml";
 
@@ -292,7 +291,7 @@ impl RaptorQProcessor {
         mut conn: r2d2::PooledConnection<SqliteConnectionManager>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         const MAX_RETRIES: u32 = 5;
-        const BATCH_SIZE: usize = 1000;
+        const BATCH_SIZE: usize = 25000;
         const RETRY_DELAY: Duration = Duration::from_millis(50);
         let mut symbol_batch: Vec<(String, String, Vec<u8>, i64)> = Vec::with_capacity(BATCH_SIZE);
         log::info!("Insert worker started with settings: MAX_RETRIES = {}, BATCH_SIZE = {}, RETRY_DELAY = {:?}", MAX_RETRIES, BATCH_SIZE, RETRY_DELAY);
@@ -317,7 +316,7 @@ impl RaptorQProcessor {
                                 std::thread::sleep(RETRY_DELAY + Duration::from_millis(jitter));
                             }
                             Err(err) => return Err(err.into()), // Convert the error into a boxed error
-                        }
+                            }
                     }
                 },
                 WriteOperation::Symbol(symbol_data) => {
@@ -369,101 +368,112 @@ impl RaptorQProcessor {
         path: &String,
         block_hash: &String,
         pastel_id: &String,
-        pool: &Pool<SqliteConnectionManager>
+        pool: &Pool<SqliteConnectionManager>,
     ) -> Result<(EncoderMetaData, String), RqProcessorError> {
         let input = Path::new(&path);
         let original_file_hash = self.compute_original_file_hash(&input)?;
-        // Retrieve a connection from the pool
         let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get()
             .map_err(|err| RqProcessorError::new("create_metadata_and_store", "Failed to get connection from pool", err.to_string()))?;
-        // Check if the original file already exists in the database
         if RaptorQProcessor::original_file_exists(&*conn, &original_file_hash)? {
             log::info!("Original file already exists in the database: {}! Skipping it...", original_file_hash);
             return Err(RqProcessorError::new("create_metadata_and_store", "Original file already exists in the database", original_file_hash));
         }
-        let (enc, repair_symbols) = self.get_encoder(input)?;
-        // Get the encoded packets and determine the actual total number of symbols
-        log::info!("Getting the encoded packets and determining the actual total number of symbols...");
-        let encoded_packets = enc.get_encoded_packets(repair_symbols);
-        let total_symbols = encoded_packets.len() as u32;
+        // Open the file to get metadata
+        let file = File::open(&input)?;
+        let source_size = file.metadata()?.len();
+        let enc = self.get_encoder(input)?; // Get the encoder using the new get_encoder method
+        let enc_config = enc.get_config().serialize().to_vec(); // Serialize the configuration
+        let total_repair_symbols = RaptorQProcessor::repair_symbols_num(self.symbol_size, self.redundancy_factor, source_size);
+        let chunk_repair_symbols = total_repair_symbols / self.redundancy_factor as u32;
+        let mut cumulative_repair_symbols = 0;
+        let total_symbols = total_repair_symbols;
+        let mut remaining_symbols = total_symbols;
         log::info!("Total symbols to insert: {}", total_symbols);
-        log::info!("Preparing original file metadata");
+        log::info!("Remaining symbols to process: {} out of {}.", remaining_symbols, total_symbols);
         let original_file_metadata = (
             original_file_hash.clone(),
             path.clone(),
             input.metadata().ok().map_or(0.0, |m| m.len() as f64 / 1_000_000.0),
-            total_symbols as i32,
+            total_repair_symbols as i32,
             block_hash.clone(),
             pastel_id.clone(),
-            enc.get_config().serialize().to_vec(),
+            vec![], // Will be populated later
         );
-        log::info!("Original file metadata prepared: {:?}, {:?}, {:?}, {:?}, {:?}", path, original_file_hash, total_symbols, pastel_id, block_hash);
-        log::info!("Preparing symbols...");
-        let remaining_symbols = AtomicU32::new(total_symbols);
-        let original_file_hash_ref = &original_file_hash;
-        let symbols_and_files: Vec<_> = {
-            encoded_packets
-                .par_iter()
-                .enumerate()
-                .map(|(index, packet)| {
-                    if index % 100 == 0 {
-                        let remaining = remaining_symbols.fetch_sub(100, Ordering::Relaxed);
-                        log::info!("Remaining symbols to process: {} out of {}.", remaining, total_symbols);
-                    }
-                    (
-                        original_file_hash_ref.clone(), // Use the reference here
-                        RaptorQProcessor::symbols_id(&packet.serialize()),
-                        packet.serialize(),
-                        get_current_timestamp(),
-                    )
-                })
-                .collect()
-        };
-        log::info!("Symbols prepared, now inserting...");
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
-        let workers: Vec<_> = (0..NUM_WORKERS)
-            .map(|_| {
-                let rx_queue = rx_queue.clone();
-                let pool = pool.clone(); // Clone the pool here
-                std::thread::spawn(move || {
-                    let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get().expect("Failed to get connection from pool.");
-                    RaptorQProcessor::insert_worker_func(rx_queue, conn).expect("Insert worker failed");
-                })
-            })
-            .collect();
-        log::info!("Inserting original file metadata...");
         tx_queue.send(WriteOperation::OriginalFile(original_file_metadata)).unwrap();
-        log::info!("Sending symbols to insert worker(s)...");
-        for symbol_data in symbols_and_files {
-            tx_queue.send(WriteOperation::Symbol(symbol_data)).unwrap();
-        }
-        log::info!("Sending termination signal to insert worker(s)...");
-        for _ in 0..NUM_WORKERS {
-            tx_queue.send(WriteOperation::Terminate).unwrap();
-        }
-        log::info!("Waiting for workers to complete...");
-        for worker in workers {
-            worker.join().expect("Worker thread panicked");
+        for chunk in 0..self.redundancy_factor {
+            log::info!("Encoding and inserting chunk {}/{}.", chunk + 1, self.redundancy_factor);
+            // Create a new encoder for this chunk by reading the file
+            let enc = self.get_encoder(input)?;
+            // Calculate the number of new symbols to generate for this chunk
+            let new_repair_symbols = chunk_repair_symbols * (chunk as u32 + 1) - cumulative_repair_symbols;
+            // Get the encoded packets for this chunk, based on the new symbols required
+            let encoded_packets = enc.get_encoded_packets(new_repair_symbols + cumulative_repair_symbols);
+            // Take the new repair symbols that have not been processed yet
+            let new_encoded_packets = encoded_packets
+                .iter()
+                .skip(cumulative_repair_symbols as usize)
+                .take(new_repair_symbols as usize)
+                .collect::<Vec<_>>();
+            let new_encoded_packets_len = new_encoded_packets.len() as u32;
+            cumulative_repair_symbols += new_encoded_packets_len; // Update the cumulative count
+            remaining_symbols = total_symbols - cumulative_repair_symbols; // Update remaining symbols
+            log::info!("Remaining symbols to process: {} out of {}.", remaining_symbols, total_symbols);
+            // Prepare the symbols and files (use new_encoded_packets instead of encoded_packets)
+            let symbols_and_files: Vec<_> = new_encoded_packets
+                .par_iter()
+                .map(|packet| (
+                    original_file_hash.clone(),
+                    RaptorQProcessor::symbols_id(&packet.serialize()),
+                    packet.serialize(),
+                    get_current_timestamp(),
+                ))
+                .collect();
+            // Start worker threads for this chunk
+            let workers: Vec<_> = (0..NUM_WORKERS)
+                .map(|_| {
+                    let rx_queue = rx_queue.clone();
+                    let pool = pool.clone();
+                    std::thread::spawn(move || {
+                        let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get().expect("Failed to get connection from pool.");
+                        RaptorQProcessor::insert_worker_func(rx_queue, conn).expect("Insert worker failed");
+                    })
+                })
+                .collect();
+            log::info!("Sending symbols to insert worker(s)...");
+            for symbol_data in symbols_and_files {
+                tx_queue.send(WriteOperation::Symbol(symbol_data)).unwrap();
+            }
+            log::info!("Sending termination signal to insert worker(s)...");
+            for _ in 0..NUM_WORKERS {
+                tx_queue.send(WriteOperation::Terminate).unwrap();
+            }
+            log::info!("Waiting for workers to complete...");
+            for worker in workers {
+                worker.join().expect("Worker thread panicked");
+            }
         }
         log::info!("Original file metadata and symbols inserted successfully.");
-        Ok(
-            (EncoderMetaData {
-                encoder_parameters: enc.get_config().serialize().to_vec(),
-                source_symbols: total_symbols - repair_symbols,
-                repair_symbols},
-            original_file_hash) // original_file_hash remains accessible here
-        )
+        Ok((
+            EncoderMetaData {
+                encoder_parameters: enc_config, // Use the serialized configuration extracted earlier
+                source_symbols: (source_size as u32) / (self.symbol_size as u32), // Calculating source symbols based on file size
+                repair_symbols: total_repair_symbols, // Using the total repair symbols calculated earlier
+            },
+            original_file_hash,
+        ))
     }
-
+    
     pub fn encode(&self, path: &String, pool: &Pool<SqliteConnectionManager>) -> Result<(EncoderMetaData, String), RqProcessorError> {
         log::info!("Starting encoding process for file: {}", path);
         let input = Path::new(&path);
-        let (enc, repair_symbols) = self.get_encoder(input)?;
+        let enc = self.get_encoder(input)?;
+        let repair_symbols = RaptorQProcessor::repair_symbols_num(self.symbol_size, self.redundancy_factor, input.metadata().unwrap().len());
         log::info!("Encoder obtained with {} repair symbols.", repair_symbols);
         let original_file_hash = self.compute_original_file_hash(&input)?;
         log::info!("Original file hash computed: {}", original_file_hash);
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
-        let encoded_symbols: Vec<EncodingPacket> = enc.get_encoded_packets(repair_symbols);            
+        let encoded_symbols: Vec<EncodingPacket> = enc.get_encoded_packets(repair_symbols);
         log::info!("Symbols obtained for encoding.");
         let timestamp = get_current_timestamp();
         // Prepare symbol data for worker threads
@@ -541,7 +551,7 @@ impl RaptorQProcessor {
         file.write_all(&result)?;
         Ok(output_path)
     }
-    
+
     pub fn decode_with_selected_symbols(&self, conn: &Connection, selected_symbol_hashes: &[String], encoder_parameters: &Vec<u8>) -> Result<Vec<u8>, RqProcessorError> {
         if encoder_parameters.len() != 12 {
             return Err(RqProcessorError::new("decode_with_selected_symbols", "encoder_parameters length must be 12", "".to_string()));
@@ -550,54 +560,45 @@ impl RaptorQProcessor {
         cfg.copy_from_slice(encoder_parameters);
         let config = ObjectTransmissionInformation::deserialize(&cfg);
         let mut dec = Decoder::new(config);
-        // Create placeholders for the query based on the number of selected hashes
-        let placeholders: String = selected_symbol_hashes.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
-        let sql_query = format!(
-            "SELECT rq_symbol_file_data FROM rq_symbols WHERE rq_symbol_file_sha3_256_hash IN ({})",
-            placeholders
-        );
-
-        let mut stmt = conn.prepare(&sql_query)
-        .map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot prepare statement", err.to_string()))?;
-        // Create a vector of parameters to bind
-        let params: Vec<&dyn ToSql> = selected_symbol_hashes.iter().map(|x| x as &dyn ToSql).collect();
-        // Execute the query with the bound parameters
-        let symbol_rows = stmt.query_map(&*params, |row| Ok(row.get::<_, Vec<u8>>(0)?))
-        .map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot query symbols", err.to_string()))?;
-    
-        // Deserialize symbols into EncodingPacket objects and add them to the decoder
-        for symbol_row in symbol_rows {
-            let symbol_data: Vec<u8> = symbol_row.map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot process symbols", err.to_string()))?;
-            let symbol_packet = EncodingPacket::deserialize(&symbol_data);
-            dec.add_new_packet(symbol_packet);
+        const CHUNK_SIZE: usize = 900; // To keep below SQLite's limit
+        for chunk in selected_symbol_hashes.chunks(CHUNK_SIZE) {
+            // Create placeholders for the query based on the number of selected hashes in the chunk
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
+            let sql_query = format!(
+                "SELECT rq_symbol_file_data FROM rq_symbols WHERE rq_symbol_file_sha3_256_hash IN ({})",
+                placeholders
+            );
+            let mut stmt = conn.prepare(&sql_query)
+                .map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot prepare statement", err.to_string()))?;
+            // Create a vector of parameters to bind
+            let params: Vec<&dyn ToSql> = chunk.iter().map(|x| x as &dyn ToSql).collect();
+            // Execute the query with the bound parameters
+            let symbol_rows = stmt.query_map(&*params, |row| Ok(row.get::<_, Vec<u8>>(0)?))
+                .map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot query symbols", err.to_string()))?;
+            // Deserialize symbols into EncodingPacket objects and add them to the decoder
+            for symbol_row in symbol_rows {
+                let symbol_data: Vec<u8> = symbol_row.map_err(|err| RqProcessorError::new("decode_with_selected_symbols", "Cannot process symbols", err.to_string()))?;
+                let symbol_packet = EncodingPacket::deserialize(&symbol_data);
+                dec.add_new_packet(symbol_packet);
+            }
         }
         // Retrieve the result
         let result = dec.get_result().ok_or_else(|| RqProcessorError::new("decode_with_selected_symbols", "Decoding failed", "".to_string()))?;
         Ok(result)
     }
-    
-    fn get_encoder(&self, path: &Path) -> Result<(Encoder, u32), RqProcessorError> {
-        // Open the file
-        let file = File::open(&path).map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot open file", path, err.to_string()))?;
-        
-        // Wrap it in a buffered reader
-        let mut reader = BufReader::new(file);
-    
-        // Get the source size
-        let source_size = reader.get_ref().metadata().map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot access metadata of file", path, err.to_string()))?.len();
-    
-        // Read the file data
-        let mut data = Vec::new();
-        reader.read_to_end(&mut data).map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot read input file", path, err.to_string()))?;
-    
-        // Create the encoder
-        let config = ObjectTransmissionInformation::with_defaults(source_size, self.symbol_size);
-        let encoder = Encoder::new(&data, config);
-        let repair_symbols = RaptorQProcessor::repair_symbols_num(self.symbol_size, self.redundancy_factor, source_size);
-    
-        Ok((encoder, repair_symbols))
-    }
 
+    fn get_encoder(&self, path: &Path) -> Result<Encoder, RqProcessorError> {
+        let mut file = File::open(&path).map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot open file", path, err.to_string()))?;
+        let source_size = file.metadata().map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot access metadata of file", path, err.to_string()))?.len();
+        let mut data = Vec::with_capacity(source_size as usize);
+        file.read_to_end(&mut data).map_err(|err| RqProcessorError::new_file_err("get_encoder", "Cannot read input file", path, err.to_string()))?;
+        let mut builder: raptorq::EncoderBuilder = raptorq::EncoderBuilder::new();
+        builder.set_max_packet_size(self.symbol_size);
+        // You can set other parameters if needed
+        let encoder = builder.build(&data);
+        Ok(encoder)
+    }
+    
     fn repair_symbols_num(symbol_size: u16, redundancy_factor: u8, data_len: u64) -> u32 {
         if data_len <= symbol_size as u64 {
             redundancy_factor as u32
@@ -902,7 +903,8 @@ mod tests {
 
 
         const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
-        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
+        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
+        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
 
 
         fn generate_test_file() -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
@@ -941,7 +943,6 @@ mod tests {
             // Read the configuration
             log::info!("Reading rqconfig.toml at path: rqconfig.toml");
             let config = toml::from_str::<Config>(&fs::read_to_string(RQ_CONFIG_PATH)?)?;
-            let redundancy_factor = config.redundancy_factor as f64;
 
             // Choose between using a static test file or generating a random test file
             log::info!("Opening STATIC_TEST_FILE at path: {}", STATIC_TEST_FILE);
@@ -1009,18 +1010,16 @@ mod tests {
             log::info!("Now attempting to decode original file using a random subset of RQ symbol files...");
             // Number of random decoding attempts
             let attempts = 10;
-            // Read the original file size in kilobytes
-            let original_file_size_kb = input_test_file_data.len() as f64 / 1024.0;
-            // Extract the symbol size in kilobytes
-            let symbol_size_kb = config.symbol_size as f64 / 1024.0;
-            // Redundancy factor
-            let redundancy_factor = config.redundancy_factor as f64;
-            // Calculate the number of source symbols required
-            let source_symbols = (original_file_size_kb / symbol_size_kb).ceil() as usize;
-            // Calculate the number of symbols to fetch, including redundancy
-            let symbols_to_fetch = (redundancy_factor * source_symbols as f64).ceil() as usize;
-            log::info!("Number of random decoding attempts: {}", attempts);
-            log::info!("Number of symbols to fetch for decoding: {}", symbols_to_fetch);
+            // Original file size in bytes
+            let original_file_size = input_test_file_data.len();
+            // Size of each symbol file in bytes
+            let symbol_size = config.symbol_size;
+            // Calculate the required size with a small cushion (e.g., 1.005 for 100.5%)
+            let required_size = (original_file_size as f64 * 1.005).ceil() as usize;
+            // Calculate the number of symbols to fetch based on the required size and symbol size
+            let symbols_to_fetch = (required_size as f64 / symbol_size as f64).ceil() as usize;
+            log::info!("Number of random decoding attempts to try: {}", attempts);
+            log::info!("Number of symbols to fetch for decoding: {} (compared to total number of generated RQ symbol files of {})", symbols_to_fetch, metadata.source_symbols + metadata.repair_symbols);
             log::info!("Now attempting to reconstruct original file {} {} times...", STATIC_TEST_FILE, attempts);
             for attempt_number in 0..attempts {
                 log::info!("Attempt {}...", attempt_number);
@@ -1037,7 +1036,7 @@ mod tests {
                 let mut rng = rand::thread_rng();
                 log::info!("Randomly selecting a subset of {} symbol hashes...", symbols_to_fetch);
                 let selected_symbol_hashes: Vec<String> = all_symbol_hashes.choose_multiple(&mut rng, symbols_to_fetch).cloned().collect();
-                log::info!("Selected symbol hash count versus symbols_to_fetch: {} vs {}", selected_symbol_hashes.len(), symbols_to_fetch);
+                assert_eq!(selected_symbol_hashes.len(), symbols_to_fetch, "Selected symbol hashes count does not match symbols_to_fetch");
                 // Decode using the selected subset of symbol hashes and verify
                 log::info!("Now attempting to decode using the selected subset and verifying...");
                 let decoded_file_data = processor.decode_with_selected_symbols(&conn, &selected_symbol_hashes, &metadata.encoder_parameters)?;
