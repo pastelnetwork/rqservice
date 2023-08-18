@@ -75,9 +75,9 @@ impl RaptorQ for RaptorQService {
                 Ok(Response::new(reply))
             },
             Err(e) => {
-                // Handle error case
                 log::error!("Error while processing metadata: {:?}", e);
-                Err(Status::internal("Error while processing metadata"))
+                let error_message = format!("Error while processing metadata: {}", e.get_message()); // Use the accessor method
+                Err(Status::internal(error_message)) // Include the error message in the Status object
             }
         }
     }
