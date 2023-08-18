@@ -28,15 +28,23 @@ def encode_metadata(file_path):
     except Exception as e:
         logging.error(f"Error in encode_metadata: {e}\n{traceback.format_exc()}")
 
-def encode(file_path):
+def encode_metadata(file_path):
     try:
-        logging.info("Encoding...")
-        request = pb2.EncodeRequest(path=file_path)
-        response = stub.Encode(request)
-        logging.info(f"Encoded symbols with count: {response.symbols_count}, path: {response.path}")
+        logging.info("Encoding metadata...")
+        request = pb2.EncodeMetaDataRequest(
+            path=file_path,
+            files_number=0,
+            block_hash="example_block_hash",
+            pastel_id="example_pastel_id"
+        )
+        response = stub.EncodeMetaData(request)
+        logging.info(f"Received encoder parameters: {response.encoder_parameters}, symbols_count: {response.symbols_count}, path: {response.path}")
         return response
-    except Exception as e:
-        logging.error(f"Error in encode: {e}\n{traceback.format_exc()}")
+    except grpc._channel._InactiveRpcError as e:
+        if e.code() == grpc.StatusCode.INTERNAL and "Original file already exists in the database" in str(e.details()):
+            logging.error("The file has already been processed and exists in the database. Skipping encoding.")
+        else:
+            logging.error(f"Error in encode_metadata: {e}\n{traceback.format_exc()}")
 
 def decode(encoder_parameters, path):
     try:
