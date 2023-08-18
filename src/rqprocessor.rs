@@ -553,7 +553,7 @@ impl RaptorQProcessor {
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("");
-        let reconstructed_dir = Path::new("reconstructed_files").canonicalize().unwrap_or_else(|_| std::path::PathBuf::from("reconstructed_files"));
+        let reconstructed_dir = Path::new("reconstructed_files").canonicalize().expect("Failed to get absolute path");
         let output_path_buf = reconstructed_dir.join(original_file_name);
         // Create the directory if it doesn't exist
         std::fs::create_dir_all(&reconstructed_dir)?;
@@ -715,7 +715,7 @@ impl From<Box<dyn std::error::Error>> for RqProcessorError {
 
 // Test Code
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use env_logger;
     use serial_test::serial;
 
@@ -903,7 +903,7 @@ mod tests {
     }
 
     // End to end test
-    mod end_to_end_tests  {
+    pub mod end_to_end_tests  {
         use super::*;
         use rand::Rng;
         use std::fs;
@@ -912,8 +912,8 @@ mod tests {
 
 
         const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
-        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
-        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
+        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
+        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
 
 
         fn generate_test_file() -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
@@ -943,7 +943,7 @@ mod tests {
 
         #[test]
         #[serial]
-        fn test_rqprocessor() -> Result<(), Box<dyn std::error::Error>> {
+        pub fn test_rqprocessor() -> Result<(), Box<dyn std::error::Error>> {
                     
             let start_time = Instant::now(); // Mark the start time
             initialize_database(TEST_DB_PATH).unwrap();
