@@ -63,6 +63,9 @@ impl RqProcessorError {
             prev_msg
         }
     }
+    pub fn get_message(&self) -> &str {
+        &self.msg
+    }
 }
 
 impl std::error::Error for RqProcessorError {}
