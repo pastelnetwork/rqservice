@@ -38,16 +38,27 @@ def write_rq_symbol_files_from_db(db_path, output_dir, original_hash):
         results = cursor.fetchall()  # Store the results in a variable
         logging.info(f"Number of results found in db: {len(results)}")
         delete_hashes = []  # List to store hashes for deletion
-        for row in results:  # Iterate over the stored results
+        logging.info(f"Writing RQ symbol files for fake task_id {fake_task_id} to {symbols_path}")
+        for idx, row in enumerate(results):  # Iterate over the stored results
+            if idx % 10000 == 0:
+                logging.info(f"Writing RQ symbol file {idx} of {len(results)}")
             symbol_hash, symbol_data = row
             delete_hashes.append(symbol_hash)  # Append the hash to the deletion list
             symbol_file_path = os.path.join(symbols_path, symbol_hash)
             with open(symbol_file_path, "wb") as symbol_file:
                 symbol_file.write(symbol_data)
         # Delete the corresponding entries from the database
-        delete_query = "DELETE FROM rq_symbols WHERE rq_symbol_file_sha3_256_hash IN ({})".format(','.join('?' for _ in delete_hashes))
-        cursor.execute(delete_query, delete_hashes)
-        conn.commit()  # Commit the transaction
+        CHUNK_SIZE = 900  # Define a reasonable chunk size
+        # Start a transaction
+        conn.execute("BEGIN TRANSACTION;")
+        for i in range(0, len(delete_hashes), CHUNK_SIZE):
+            if i % 10000 == 0:
+                logging.info(f"Deleting RQ symbol file {i} of {len(delete_hashes)}")
+            chunk = delete_hashes[i:i + CHUNK_SIZE]
+            delete_query = "DELETE FROM rq_symbols WHERE rq_symbol_file_sha3_256_hash IN ({})".format(','.join('?' for _ in chunk))
+            cursor.execute(delete_query, chunk)
+        # Commit the transaction
+        conn.execute("COMMIT;")
         logging.info(f"Successfully wrote RQ symbol files for fake task_id {fake_task_id} to {symbols_path}")
         return symbols_path
     except Exception as e:
