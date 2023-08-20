@@ -26,7 +26,7 @@ pub struct RaptorQService {
 
 impl Default for RaptorQService {
     fn default() -> Self {
-        let manager = SqliteConnectionManager::file(DB_PATH);
+        let manager = SqliteConnectionManager::file(&**rqprocessor::DB_PATH);
         let pool = r2d2::Pool::builder()
             .build(manager)
             .expect("Failed to create pool");
@@ -61,15 +61,15 @@ impl RaptorQ for RaptorQService {
 
         let pool = &self.pool; // Make sure to access the pool in your specific context
     
-        log::debug!("Calling 'create_metadata_and_store'...");
-        match processor.create_metadata_and_store(&req.path, &req.block_hash, &req.pastel_id, pool) {
+        log::debug!("Calling 'create_metadata'...");
+        match processor.create_metadata(&req.path, &req.block_hash, &req.pastel_id, pool) {
                                     Ok((meta, path)) => {
                 log::debug!("Successfully processed metadata.");
-                // Build the reply using the meta and path
+                // Build the reply using the meta and hash
                 let reply = rq::EncodeMetaDataReply {
                     encoder_parameters: meta.encoder_parameters,
                     symbols_count: meta.source_symbols + meta.repair_symbols,
-                    path,
+                    path
                 };
     
                 Ok(Response::new(reply))
@@ -119,53 +119,33 @@ impl RaptorQ for RaptorQService {
             }
         }
     }
-    
 
     async fn decode(&self, request: Request<DecodeRequest>) -> Result<Response<DecodeReply>, Status> {
         log::info!("Received 'decode' request: {:?}", request);
-
+    
         // Create the RaptorQProcessor with the specified DB path
-        log::debug!("Creating RaptorQProcessor...");
-        let processor_result = rqprocessor::RaptorQProcessor::new(DB_PATH);
-
-        let processor = match processor_result {
-            Ok(processor) => processor,
-            Err(err) => {
+        let processor = rqprocessor::RaptorQProcessor::new(DB_PATH)
+            .map_err(|err| {
                 log::error!("Failed to create processor: {:?}", err);
-                return Err(Status::internal("Failed to create processor"));
-            }
-        };
-        // Obtain a database connection
-        let conn = match self.pool.get() {
-            Ok(connection) => connection,
-            Err(e) => {
-                log::error!("Database connection error: {:?}", e);
-                return Err(Status::internal("Database connection error"));
-            }
-        };
-        
+                Status::internal("Failed to create processor")
+            })?;
+    
         let req = request.into_inner();
     
-        // Convert the provided path to a Path object
-        let input_path = Path::new(&req.path);
-    
-        // Compute the original file hash
-        log::info!("Computing original file hash...");
-        let original_file_hash = match processor.compute_original_file_hash(&input_path) {
-            Ok(hash) => hash,
-            Err(e) => {
-                log::error!("File hash computation error: {:?}", e);
-                return Err(Status::internal("File hash computation error"));
-            }
-        };
-        log::info!("Computed original file hash: {}", original_file_hash);
-
         // Check the length of encoder_parameters and ensure it is as expected
         if req.encoder_parameters.len() != 12 {
             return Err(Status::invalid_argument("Invalid encoder_parameters length"));
         }
+    
+        // Convert the provided encoder_parameters to a [u8; 12] array
+        let encoder_parameters_array: Vec<u8> = req.encoder_parameters
+            .try_into()
+            .map_err(|_| Status::internal("Failed to convert encoder_parameters to array"))?;
+    
         log::info!("Calling 'decode' method...");
-        match processor.decode(&conn, &req.encoder_parameters, &original_file_hash) {
+    
+        // Pass the path to the location where the RQ symbol files are stored
+        match processor.decode(&self.pool, &encoder_parameters_array, &req.path) {
             Ok(path) => {
                 log::info!("Successfully decoded.");
                 let reply = rq::DecodeReply { path };
@@ -177,7 +157,7 @@ impl RaptorQ for RaptorQService {
             }
         }
     }
-}
+}    
 
 
 pub async fn start_server(settings: &ServiceSettings, pool: &Pool<SqliteConnectionManager>) -> Result<(), Box<dyn std::error::Error>> {
