@@ -97,14 +97,21 @@ def decode(encoder_parameters, path):
         logging.error(f"Error in decode: {e}\n{traceback.format_exc()}")
 
 if __name__ == "__main__":
+    
+    use_test_decode_only = 1
+
     DB_PATH = "/home/ubuntu/.pastel/testnet3/rq_symbols.sqlite" # Path to the SQLite database file
     OUTPUT_DIR = "/home/ubuntu/.pastel/rqfiles" # Directory where you want to write the RQ symbol files
     INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/input_test_file_small.jpg"
     # INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/cp_detector.7z"
+    
+    if use_test_decode_only:
+        os.remove(DB_PATH)
+        logging.info(f"Removed database file {DB_PATH}")
+
     channel = grpc.insecure_channel('localhost:50051')  # Change to your server's address and port
     stub = pb2_grpc.RaptorQStub(channel)
     
-    use_test_decode_only = 0
     if not use_test_decode_only:
         logging.info(f"Testing with original file: {INPUT_FILE_PATH}")
         original_hash = compute_sha3_256(INPUT_FILE_PATH)
@@ -130,13 +137,18 @@ if __name__ == "__main__":
     else:
         logging.info("Testing decode only...")
         INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/input_test_file_small.jpg"
-        task_id = 'fa1cc95f'
+        # get most recently created directory in OUTPUT_DIR:
+        dirs = [os.path.join(OUTPUT_DIR, d) for d in os.listdir(OUTPUT_DIR)]
+        logging.info(f"Found directories: {dirs}")
+        # extract task_id from directory name:
+        task_id = max(dirs, key=os.path.getmtime).split('/')[-1]
+        logging.info(f"Using task_id: {task_id}")
+        # task_id = 'e27ea033'
         rq_symbol_files_path = f"/home/ubuntu/.pastel/rqfiles/{task_id}/symbols"
-        os.remove(DB_PATH)
-        logging.info(f"Removed database file {DB_PATH}")
         with open('encoder_parameters', 'rb') as f:
             encoder_parameters = f.read()
         reconstructed_file_path = decode(encoder_parameters, rq_symbol_files_path)
         reconstructed_hash = compute_sha3_256(reconstructed_file_path)
+        original_hash = compute_sha3_256(INPUT_FILE_PATH)
         assert original_hash == reconstructed_hash, "Reconstructed file does not match the original file."
         logging.info("Test successful. Original and reconstructed files are identical.")
