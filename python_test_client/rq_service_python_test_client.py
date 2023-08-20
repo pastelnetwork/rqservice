@@ -98,12 +98,12 @@ def decode(encoder_parameters, path):
 
 if __name__ == "__main__":
     
-    use_test_decode_only = 1
+    use_test_decode_only = 0
 
     DB_PATH = "/home/ubuntu/.pastel/testnet3/rq_symbols.sqlite" # Path to the SQLite database file
     OUTPUT_DIR = "/home/ubuntu/.pastel/rqfiles" # Directory where you want to write the RQ symbol files
-    INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/input_test_file_small.jpg"
-    # INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/cp_detector.7z"
+    # INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/input_test_file_small.jpg"
+    INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/cp_detector.7z"
     
     if use_test_decode_only:
         os.remove(DB_PATH)
@@ -116,6 +116,7 @@ if __name__ == "__main__":
         logging.info(f"Testing with original file: {INPUT_FILE_PATH}")
         original_hash = compute_sha3_256(INPUT_FILE_PATH)
         metadata_response = encode_metadata(INPUT_FILE_PATH)
+        logging.info(f'Receieved metadata response: {metadata_response}')
         logging.info(f'Encoder parameters: {metadata_response.encoder_parameters}')
         with open('encoder_parameters', 'wb') as f:
             f.write(metadata_response.encoder_parameters)
