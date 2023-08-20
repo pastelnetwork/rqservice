@@ -165,8 +165,8 @@ impl RaptorQProcessor {
                 }
             };
         }
-        // set_pragma_if_different!("journal_mode", "WAL");
-        // set_pragma_if_different!("wal_autocheckpoint", "100");
+        set_pragma_if_different!("journal_mode", "WAL");
+        set_pragma_if_different!("wal_autocheckpoint", "100");
         set_pragma_if_different!("synchronous", "NORMAL");
         set_pragma_if_different!("cache_size", "-524288");
         set_pragma_if_different!("busy_timeout", "2000");
@@ -272,7 +272,6 @@ impl RaptorQProcessor {
         conn: &mut r2d2::PooledConnection<SqliteConnectionManager>,
         symbol_batch: &[(String, String, String, Vec<u8>, i64)],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = WRITE_LOCK.lock().unwrap();
         const MAX_RETRIES: u32 = 5;
         const RETRY_DELAY: Duration = Duration::from_millis(50);
         let mut retries = 0;
@@ -379,11 +378,33 @@ impl RaptorQProcessor {
                         }
                     }
                 },
-                    WriteOperation::UpdateOriginalFileHash((task_id, original_file_hash)) => {
-                    let query = "UPDATE rq_symbols SET original_file_sha3_256_hash = ?1 WHERE task_id = ?2";
-                    let mut update_stmt = conn.prepare(query)
-                        .map_err(|err| RqProcessorError::new("insert_worker_func", "Cannot prepare update statement", err.to_string()))?;
-                    update_stmt.execute(params![original_file_hash, task_id])?;
+                WriteOperation::UpdateOriginalFileHash((task_id, original_file_hash)) => {
+                    let mut retries = 0;
+                    loop {
+                        log::info!("Attempting to acquire write lock now...");
+                        let _guard = WRITE_LOCK.lock().map_err(|err| {
+                            RqProcessorError::new("insert_worker_func", "Failed to acquire write lock", err.to_string())
+                        })?;
+                        match conn.prepare("UPDATE rq_symbols SET original_file_sha3_256_hash = ?1 WHERE task_id = ?2") {
+                            Ok(mut update_stmt) => {
+                                match update_stmt.execute(params![original_file_hash, task_id]) {
+                                    Ok(_) => break,
+                                    Err(_) if retries < MAX_RETRIES => {
+                                        retries += 1;
+                                        let jitter = rand::thread_rng().gen_range(0..10);
+                                        std::thread::sleep(RETRY_DELAY + Duration::from_millis(jitter));
+                                    },
+                                    Err(err) => return Err(err.into()), // Convert the error into a boxed error
+                                }
+                            },
+                            Err(_) if retries < MAX_RETRIES => {
+                                retries += 1;
+                                let jitter = rand::thread_rng().gen_range(0..10);
+                                std::thread::sleep(RETRY_DELAY + Duration::from_millis(jitter));
+                            },
+                            Err(err) => return Err(err.into()), // Convert the error into a boxed error
+                        }
+                    }
                 },
                 WriteOperation::Terminate => {
                     break; // Break out of the loop when the termination signal is received
@@ -393,9 +414,26 @@ impl RaptorQProcessor {
         // Insert any remaining symbols in the batch with retry logic
         if !symbol_batch.is_empty() {
             log::info!("Inserting remaining symbols, count: {}", symbol_batch.len());
-            RaptorQProcessor::insert_symbols_with_retry(&mut conn, &symbol_batch)?;
+            let mut retries = 0;
+            loop {
+                log::info!("Attempting to acquire write lock now...");
+                let _guard = WRITE_LOCK.lock().map_err(|err| {
+                    RqProcessorError::new("insert_worker_func", "Failed to acquire write lock", err.to_string())
+                })?;
+                match RaptorQProcessor::insert_symbols_with_retry(&mut conn, &symbol_batch) {
+                    Ok(_) => break,
+                    Err(_) if retries < MAX_RETRIES => {
+                        retries += 1;
+                        let jitter = rand::thread_rng().gen_range(0..10);
+                        std::thread::sleep(RETRY_DELAY + Duration::from_millis(jitter));
+                    },
+                    Err(err) => return Err(err.into()), // Convert the error into a boxed error
+                }
+            }
         }
         log::info!("Insert worker function completed successfully.");
+        // Now do manual WAL checkpoint full:
+        conn.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
         Ok(())
     }
 
