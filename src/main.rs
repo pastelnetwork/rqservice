@@ -8,16 +8,69 @@ use std::sync::Arc;
 pub mod app;
 pub mod rqserver;
 pub mod rqprocessor;
+use rqprocessor::RaptorQProcessor;
+
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::str::FromStr;
 use cron::Schedule;
 use std::thread;
-use chrono::{Utc, Duration as ChronoDuration};
-use rqprocessor::RaptorQProcessor;
+use std::env;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::fs::File;
 
-pub const DB_PATH: &str = "/home/ubuntu/.pastel/testnet3/rq_symbols.sqlite";
-// pub const DB_PATH: &str = "/home/ubuntu/rqservice/test_files/rq_symbols.sqlite";
+use chrono::{Utc, Duration as ChronoDuration};
+use once_cell::sync::Lazy;
+
+fn get_paths() -> (String, String, String) {
+    let home_dir = env::var("HOME").expect("HOME environment variable not set");
+    let conf_path = format!("{}/.pastel/pastel.conf", home_dir);
+    let file = File::open(Path::new(&conf_path)).expect("Failed to open pastel.conf");
+    let reader = BufReader::new(file);
+
+    let mut is_testnet = false;
+    for line in reader.lines() {
+        if line.expect("Failed to read line") == "testnet=1" {
+            is_testnet = true;
+            break;
+        }
+    }
+    if is_testnet {
+        (
+            format!("{}/.pastel/testnet3/rq_symbols.sqlite", home_dir),
+            format!("{}/.pastel/testnet3/rqfiles", home_dir),
+            format!("{}/.pastel/rqconfig.toml", home_dir),
+        )
+    } else {
+        (
+            format!("{}/.pastel/rq_symbols.sqlite", home_dir),
+            format!("{}/.pastel/rqfiles", home_dir),
+            format!("{}/.pastel/rqconfig.toml", home_dir),
+        )
+    }
+}
+
+
+fn create_config_file_if_not_exists(path: &str) -> std::io::Result<()> {
+    let path = Path::new(path);
+    if !path.exists() {
+        let mut file = File::create(path)?;
+        writeln!(file, "grpc-service = \"127.0.0.1:50051\"")?;
+        writeln!(file, "symbol-size = 50000")?;
+        writeln!(file, "redundancy-factor = 12")?;
+    }
+    Ok(())
+}
+
+pub static DB_PATH: Lazy<String> = Lazy::new(|| get_paths().0);
+pub static RQ_FILES_PATH: Lazy<String> = Lazy::new(|| get_paths().1);
+pub static RQ_CONFIG_PATH: Lazy<String> = Lazy::new(|| {
+    let path = get_paths().2;
+    create_config_file_if_not_exists(&path).expect("Failed to create config file");
+    path
+});
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,14 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the database
 
     log::info!("Initializing RQ-Service database...");
-    rqprocessor::initialize_database(DB_PATH).unwrap();
+    rqprocessor::initialize_database(&*DB_PATH).unwrap();
     log::info!("Creating database pool...");
-    let manager = SqliteConnectionManager::file(rqprocessor::DB_PATH);
-    let pool = Arc::new(Pool::new(manager).expect("Failed to create pool."));
+    let manager = SqliteConnectionManager::file(&**rqprocessor::DB_PATH);
+    let pool: Arc<Pool<SqliteConnectionManager>> = Arc::new(Pool::new(manager).expect("Failed to create pool."));
 
     log::info!("Creating RaptorQ Processor instance...");
     // Create the RaptorQProcessor instance
-    let rq_processor = RaptorQProcessor::new(DB_PATH)?;
+    let rq_processor = RaptorQProcessor::new(&*DB_PATH)?;
 
     // Clone the Arc for the spawned thread
     let pool_clone = Arc::clone(&pool);
