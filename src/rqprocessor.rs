@@ -20,7 +20,6 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use toml;
 use itertools::Itertools;
-use tempfile::NamedTempFile;
 
 lazy_static! {
     static ref WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -37,6 +36,7 @@ pub static RQ_CONFIG_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_CONFIG_PA
 
 #[derive(Deserialize)]
 struct RqConfig {
+    #[allow(dead_code)]
     #[serde(rename = "grpc-service")]
     grpc_service: String,
     #[serde(rename = "symbol-size")]
@@ -272,6 +272,7 @@ impl RaptorQProcessor {
         conn: &mut r2d2::PooledConnection<SqliteConnectionManager>,
         symbol_batch: &[(String, String, String, Vec<u8>, i64)],
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = WRITE_LOCK.lock().unwrap();
         const MAX_RETRIES: u32 = 5;
         const RETRY_DELAY: Duration = Duration::from_millis(50);
         let mut retries = 0;
@@ -641,6 +642,15 @@ impl RaptorQProcessor {
             symbol_data_vec.push(symbol_data);
         }
         log::info!("Retrieved {} symbols from the database.", symbol_data_vec.len());
+        let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
+        let pool_clone = pool.clone(); // Clone the pool
+        std::thread::spawn(move || {
+            let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool_clone.get()
+                .expect("Failed to get connection from pool.");
+            RaptorQProcessor::insert_worker_func(rx_queue, conn)
+                .expect("Insert worker failed");
+        });
+        let files_number = symbol_data_vec.len() as u32;
         for symbol_data in symbol_data_vec {
             if let Some(result) = dec.decode(EncodingPacket::deserialize(&symbol_data)) {
                 // Construct the path for the restored file
@@ -654,6 +664,20 @@ impl RaptorQProcessor {
                 //Compute the hash of the restored file
                 let restored_file_hash = self.compute_original_file_hash(&restored_file_path)?;
                 log::info!("Restored file hash: {}", restored_file_hash);
+                log::info!("Updating original file hash in the `rq_symbols` table...");
+                let write_op_update_hash = WriteOperation::UpdateOriginalFileHash((task_id.clone(), restored_file_hash.clone()));
+                tx_queue.send(write_op_update_hash)?;
+                let conn = pool.get().expect("Failed to get connection from pool.");
+                // Check if the original file data already exists in the database; if not, insert it
+                if !Self::original_file_exists(&conn, &restored_file_hash)? {
+                    log::info!("Original file metadata for original file hash {} doesn't exist in the database. Inserting it now...", restored_file_hash);
+                    let restored_file_size_in_mb = restored_file.metadata()?.len() as f64 / 1_000_000.0; 
+                    let block_hash = "NA".to_string();
+                    let pastel_id = "NA".to_string();
+                    let write_op_insert_original = WriteOperation::OriginalFile((restored_file_hash, restored_file_path.to_string_lossy().into_owned(), restored_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters.clone()));
+                    tx_queue.send(write_op_insert_original)?;
+                }
+                for _ in 0..NUM_WORKERS { tx_queue.send(WriteOperation::Terminate).unwrap(); }
                 let output_path_string = restored_file_path.to_string_lossy().into_owned();
                 log::info!("Decoding completed successfully.");
                 return Ok(output_path_string);
@@ -1105,10 +1129,12 @@ pub mod tests {
 
         #[derive(Deserialize)]
         struct Config {
+            #[allow(dead_code)]
             #[serde(rename = "grpc-service")]
             grpc_service: String,
             #[serde(rename = "symbol-size")]
             symbol_size: u16,
+            #[allow(dead_code)]
             #[serde(rename = "redundancy-factor")]
             redundancy_factor: u8,
         }
