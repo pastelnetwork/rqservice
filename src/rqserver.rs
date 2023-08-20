@@ -5,8 +5,8 @@
 use crate::app::ServiceSettings;
 
 use tonic::{transport::Server, Request, Response, Status};
-use std::path::Path;
 
+#[allow(non_snake_case)]
 pub mod rq {
     tonic::include_proto!("raptorq");
 }
@@ -130,7 +130,7 @@ impl RaptorQ for RaptorQService {
                 Status::internal("Failed to create processor")
             })?;
     
-        let req = request.into_inner();
+        let req: DecodeRequest = request.into_inner();
     
         // Check the length of encoder_parameters and ensure it is as expected
         if req.encoder_parameters.len() != 12 {
