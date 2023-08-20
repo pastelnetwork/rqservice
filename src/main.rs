@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Initializing RQ-Service database...");
     rqprocessor::initialize_database(&*DB_PATH).unwrap();
     log::info!("Creating database pool...");
-    let manager = SqliteConnectionManager::file(&**rqprocessor::DB_PATH);
+    let manager: SqliteConnectionManager = SqliteConnectionManager::file(&**rqprocessor::DB_PATH);
     let pool: Arc<Pool<SqliteConnectionManager>> = Arc::new(Pool::new(manager).expect("Failed to create pool."));
 
     log::info!("Creating RaptorQ Processor instance...");
