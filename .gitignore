@@ -1,3 +1,8 @@
 /target
 /out/
 /Cargo.lock
+examples/
+golang_test_client/
+python_test_client/venv
+test_files/
+python_test_client/*/*.pyc

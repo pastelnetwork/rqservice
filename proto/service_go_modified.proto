@@ -1,0 +1,87 @@
+// Copyright (c) 2021-2023 The Pastel Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+syntax = "proto3";
+
+package raptorq;
+option go_package = "github.com/yourusername/rqservice/golang_test_client/raptorq";
+service RaptorQ {
+  // Get metadata including list of symbol ids and encoder parameter
+  //
+  // Performs encoding and stores the symbols in the SQLite database
+  //
+  // Input:
+  //      EncodeMetaDataRequest
+  //          path            - location of the input file
+  //          files_number    - how many ID files to create, can be 0
+  //          block_hash      - block_hash of the Registration ticket
+  //          pastel_id       - PastelID used to sign the Registration ticket
+  //
+  // Output:
+  //      EncodeMetaDataReply
+  //          encoder_parameters  - Object Transmission Information (12 bytes array)
+  //          path                - path to the SQLite database storing the symbols
+  //          symbols_count       - number of symbols
+  //
+  rpc EncodeMetaData(EncodeMetaDataRequest) returns(EncodeMetaDataReply);
+
+  // Encode input data blob into symbols and store them in SQLite database
+  //
+  // Input:
+  //      EncodeRequest
+  //          path            - location of the input file
+  //
+  // Output:
+  //      EncodeReply
+  //          encoder_parameters - Object Transmission Information (12 bytes array)
+  //          symbols_count      - number of created symbol files
+  //          path               - path to the SQLite database storing the symbols
+  //
+  rpc Encode(EncodeRequest) returns(EncodeReply);
+
+  // Decode symbols back into original data blob using SQLite database
+  //
+  // Input:
+  //      DecodeRequest
+  //          encoder_parameters  - Object Transmission Information (12 bytes array)
+  //          path                - location of the SQLite database with symbols
+  //
+  // Output:
+  //      DecodeReply
+  //          path                - path to the restored original file
+  //
+  rpc Decode(DecodeRequest) returns(DecodeReply);
+}
+
+message EncodeMetaDataRequest {
+  string path = 1;
+  uint32 files_number = 2;
+  string block_hash = 3;
+  string pastel_id = 4;
+}
+
+message EncodeMetaDataReply {
+  bytes encoder_parameters = 1;
+  uint32 symbols_count = 2;
+  string path = 3;
+}
+
+message EncodeRequest {
+  string path = 1;
+}
+
+message EncodeReply {
+  bytes encoder_parameters = 1;
+  uint32 symbols_count = 2;
+  string path = 3;
+}
+
+message DecodeRequest {
+  bytes encoder_parameters = 1;
+  string path = 2;
+}
+
+message DecodeReply {
+  string path = 1;
+}

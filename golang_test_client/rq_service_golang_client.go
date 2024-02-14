@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/sha3"
 	"database/sql"
-	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -12,9 +11,10 @@ import (
 	"path/filepath"
 	"time"
 
+	pb "service_go_modified"
+
 	"github.com/btcsuite/btcutil/base58"
 	_ "github.com/mattn/go-sqlite3"
-	pb "path/to/your/protobuf/package" // Update to your gRPC package
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 )
@@ -122,7 +122,6 @@ func decode(client pb.RaptorQClient, encoderParameters []byte, path string) stri
 	log.Printf("Decoded file path: %v", response.Path)
 	return response.Path
 }
-
 
 func main() {
 	useTestDecodeOnly := false
