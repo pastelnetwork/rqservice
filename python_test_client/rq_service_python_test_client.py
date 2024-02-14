@@ -111,7 +111,7 @@ if __name__ == "__main__":
     
     use_test_decode_only = 0
 
-    DB_PATH = "/home/ubuntu/.pastel/rq_symbols.sqlite" # Path to the SQLite database file
+    DB_PATH = "/home/ubuntu/.pastel/testnet3/rq_symbols.sqlite" # Path to the SQLite database file
     OUTPUT_DIR = "/home/ubuntu/.pastel/rqfiles" # Directory where you want to write the RQ symbol files
     INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/input_test_file_small.jpg"
     # INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/cp_detector.7z"
