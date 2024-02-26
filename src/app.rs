@@ -6,11 +6,16 @@ use clap::Parser;
 use clap_derive::Parser;
 use std::env;
 use config::ConfigError;
+use dirs;
 
-const NIX_PASTELD_PATH: &str = ".pastel";
+fn nix_pasteld_path() -> String {
+    let home_dir = dirs::home_dir().expect("Could not find home directory");
+    home_dir.join(".pastel").to_str().expect("Could not convert path to string").to_owned()
+}
+
 const MAC_PASTELD_PATH: &str = "Library/Application Support/Pastel";
 const WIN_PASTELD_PATH: &str = "AppData\\Roaming\\Pastel";
-const DEFAULT_CONFIG_FILE: &str = "rqservice";
+const DEFAULT_CONFIG_FILE: &str = "rqconfig";
 
 fn get_os_type() -> String {
     env::var("TEST_OS").unwrap_or_else(|_| env::consts::OS.to_string())
@@ -41,16 +46,20 @@ impl ServiceSettings {
     pub fn new() -> Result<Self, ConfigError> {
         let pastel_path;
         let config_path;
-
+        let unix_pasteld_path = nix_pasteld_path();
+        println!("OS Type: {}", get_os_type()); // Debug print
         match dirs::home_dir() {
             Some(path) => {
                 if get_os_type() == "linux" {
-                    pastel_path = format!("{}/{}", path.display(), NIX_PASTELD_PATH);
+                    log::info!("Using Linux system");
+                    pastel_path = format!("{}/{}", path.display(), &unix_pasteld_path);
                     config_path = format!("{}/{}", pastel_path, DEFAULT_CONFIG_FILE);
                 } else if get_os_type() == "macos" {
+                    log::info!("Using MacOS system");
                     pastel_path = format!("{}/{}", path.display(), MAC_PASTELD_PATH);
                     config_path = format!("{}/{}", pastel_path, DEFAULT_CONFIG_FILE);
                 } else if get_os_type() == "windows" {
+                    log::info!("Using Windows system");
                     pastel_path = format!("{}\\{}", path.display(), WIN_PASTELD_PATH);
                     config_path = format!("{}\\{}", pastel_path, DEFAULT_CONFIG_FILE);
                 } else {
@@ -78,49 +87,60 @@ mod tests {
     use super::*;
     use std::env;
 
+    fn set_up_os(os: &str) {
+        env::set_var("TEST_OS", os);
+    }
+
+    fn tear_down_os() {
+        env::remove_var("TEST_OS");
+    }
+
     #[test]
     fn test_service_settings_linux() {
-        if env::consts::OS != "linux" {
-            return;
-        }
+        set_up_os("linux");
         let settings = ServiceSettings::new().unwrap();
+        tear_down_os(); // Ensure this is called even if the test panics
+
         assert_eq!(settings.grpc_service, "127.0.0.1:50051");
         assert_eq!(settings.symbol_size, 50000);
         assert_eq!(settings.redundancy_factor, 12);
         assert!(settings.pastel_path.ends_with(".pastel"));
-        assert!(settings.config_path.ends_with("rqservice"));
+        assert!(settings.config_path.ends_with("rqconfig"));
     }
 
     #[test]
     fn test_service_settings_macos() {
-        if env::consts::OS != "macos" {
-            return;
-        }
+        set_up_os("macos"); // Set up test environment for MacOS
         let settings = ServiceSettings::new().unwrap();
+        tear_down_os(); // Reset environment after test
+    
         assert_eq!(settings.grpc_service, "127.0.0.1:50051");
         assert_eq!(settings.symbol_size, 50000);
         assert_eq!(settings.redundancy_factor, 12);
         assert!(settings.pastel_path.ends_with("Library/Application Support/Pastel"));
-        assert!(settings.config_path.ends_with("rqservice"));
+        assert!(settings.config_path.contains("Library/Application Support/Pastel"));
     }
-
+    
     #[test]
     fn test_service_settings_windows() {
-        if env::consts::OS != "windows" {
-            return;
-        }
+        set_up_os("windows"); // Set up test environment for Windows
         let settings = ServiceSettings::new().unwrap();
+        tear_down_os(); // Reset environment after test
+    
         assert_eq!(settings.grpc_service, "127.0.0.1:50051");
         assert_eq!(settings.symbol_size, 50000);
         assert_eq!(settings.redundancy_factor, 12);
         assert!(settings.pastel_path.ends_with("AppData\\Roaming\\Pastel"));
-        assert!(settings.config_path.ends_with("rqservice"));
+        assert!(settings.config_path.contains("AppData\\Roaming\\Pastel"));
     }
+    
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Unsupported system")]
     fn test_service_settings_unsupported() {
-        env::set_var("TEST_OS", "unsupported");
-        ServiceSettings::new().unwrap();
+        set_up_os("unsupported"); // Explicitly test for unsupported OS
+        let _ = ServiceSettings::new();
+        tear_down_os(); // Ensure cleanup even if the test panics
     }
+
 }

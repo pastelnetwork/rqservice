@@ -20,6 +20,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use toml;
 use itertools::Itertools;
+use dirs;
 
 lazy_static! {
     static ref WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -32,7 +33,39 @@ pub static DB_PATH: &once_cell::sync::Lazy<String> = &crate::DB_PATH;
 pub static RQ_FILES_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_FILES_PATH;
 pub static RQ_CONFIG_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_CONFIG_PATH;
 
+#[allow(dead_code)]
+fn get_unix_home_dir_path() -> String {
+    let home_dir = dirs::home_dir().expect("Could not find home directory");
+    home_dir.to_str().expect("Could not convert path to string").to_owned()
+}
 
+#[allow(dead_code)]
+fn get_test_db_path() -> String {
+    let home_dir_path = get_unix_home_dir_path();
+    format!("{}/rqservice/test_files/test_rq_symbols.sqlite", home_dir_path)
+}
+
+#[allow(dead_code)]
+fn remove_db_files(base_path: &str) -> std::io::Result<()> {
+    let base_file_path = Path::new(base_path);
+    let directory = base_file_path.parent().unwrap_or_else(|| Path::new(""));
+
+    // List of file extensions to remove, including the main database file without an extension
+    let file_extensions = vec!["", "-shm", "-wal"];
+
+    for extension in file_extensions {
+        let file_name = format!(
+            "{}{}.sqlite",
+            base_file_path.file_stem().unwrap().to_str().unwrap(),
+            extension
+        );
+        let file_path = directory.join(file_name);
+        // Attempt to remove the file, ignoring errors if the file does not exist
+        let _ = fs::remove_file(file_path);
+    }
+
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct RqConfig {
@@ -166,10 +199,10 @@ impl RaptorQProcessor {
             };
         }
         set_pragma_if_different!("journal_mode", "WAL");
-        set_pragma_if_different!("wal_autocheckpoint", "2000");
+        set_pragma_if_different!("wal_autocheckpoint", "2500");
         set_pragma_if_different!("synchronous", "NORMAL");
-        set_pragma_if_different!("cache_size", "-262144");
-        set_pragma_if_different!("busy_timeout", "2000");
+        set_pragma_if_different!("cache_size", "-524288");
+        set_pragma_if_different!("busy_timeout", "1200");
         log::debug!("Creating tables");
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rq_symbols (
@@ -957,8 +990,6 @@ pub mod tests {
             .try_init();
     }
     
-    const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
-
     impl From<RqProcessorError> for TestError {
         fn from(err: RqProcessorError) -> Self {
             TestError::RqProcessorError(err)
@@ -978,6 +1009,7 @@ pub mod tests {
     }
     
     #[derive(Debug)]
+    #[allow(dead_code)] // Suppresses warnings about unused fields
     enum TestError {
         MetaError(String),
         EncodeError(String),
@@ -1001,14 +1033,17 @@ pub mod tests {
     
     // Utility Functions
     fn setup_pool() -> Pool<SqliteConnectionManager> {
-        log::info!("Attempting to open Sqlite Pool for TEST_DB_PATH at path: {}", TEST_DB_PATH); 
-        let manager = SqliteConnectionManager::file(TEST_DB_PATH); // Use the test database path
+        let test_db_path = get_test_db_path();
+
+        log::info!("Attempting to open Sqlite Pool for TEST_DB_PATH at path: {}", test_db_path); 
+        let manager = SqliteConnectionManager::file(test_db_path); // Use the test database path
         Pool::new(manager).expect("Failed to create pool.")
     }
 
     fn test_meta(pool: &Pool<SqliteConnectionManager>, path: String, size: u32) -> Result<(EncoderMetaData, String), TestError> {
         log::info!("Testing file {}", path);
-        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
+        let test_db_path = get_test_db_path();
+        let processor = RaptorQProcessor::new(&test_db_path).unwrap();    
         let encode_time = Instant::now();
         match processor.create_metadata(&path, &String::from("12345"), &String::from("67890"), pool) {
                 Ok((meta, path)) => {
@@ -1027,7 +1062,8 @@ pub mod tests {
         
     fn test_encode(pool: &Pool<SqliteConnectionManager>, path: String, size: u32) -> Result<(EncoderMetaData, String), TestError> {
         log::info!("Testing file {}", path);
-        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
+        let test_db_path = get_test_db_path();
+        let processor = RaptorQProcessor::new(&test_db_path).unwrap();    
         let encode_time = Instant::now(); // Define the encode_time variable here
         match processor.encode(&path, pool) {
             Ok((meta, db_path)) => {
@@ -1043,7 +1079,8 @@ pub mod tests {
         
     fn test_decode(pool: &Pool<SqliteConnectionManager>, encoder_parameters: &Vec<u8>, original_file_hash: &str) -> Result<(), TestError> {
         log::info!("Testing file with original hash {}", original_file_hash);
-        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
+        let test_db_path = get_test_db_path();
+        let processor = RaptorQProcessor::new(&test_db_path).unwrap();    
         match processor.decode_from_db_using_original_file_hash(&pool, encoder_parameters, original_file_hash) {
             Ok(output_path) => {
                 log::info!("Restored file path: {}", output_path);
@@ -1082,7 +1119,8 @@ pub mod tests {
     #[test]
     fn rq_test_encode_decode() -> Result<(), TestError> {
         setup();
-        initialize_database(TEST_DB_PATH).unwrap();
+        let test_db_path = get_test_db_path();
+        initialize_database(&test_db_path).unwrap();
         let dir = tempdir()?;
         let file_path = dir.path().join("10_000_000");
         log::info!("Creating random file at path: {}", file_path.to_str().unwrap());
@@ -1093,7 +1131,7 @@ pub mod tests {
         let (meta, _path) = test_encode(&pool, file_path.to_str().unwrap().to_string(), 10_000_000)?;
         log::info!("Encoding process completed successfully.");
 
-        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
+        let processor = RaptorQProcessor::new(&test_db_path).unwrap();    
         let original_file_hash = processor.compute_original_file_hash(&file_path)?;
         log::info!("Original file hash computed in test: {}", original_file_hash);
         log::info!("Starting decoding process...");
@@ -1111,12 +1149,13 @@ pub mod tests {
         use rand::Rng;
         use tempfile::tempdir;
         use RaptorQProcessor;
-    
-        initialize_database(TEST_DB_PATH).unwrap();
+        let test_db_path = get_test_db_path();
+
+        initialize_database(&test_db_path).unwrap();
         // Sizes to test: one that's a multiple of the chunk size and one that's not
         let sizes_to_test = [256 * 1024, 256 * 1024 + 1];
     
-        let processor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();    
+        let processor = RaptorQProcessor::new(&test_db_path).unwrap();    
         for size in sizes_to_test.iter() {
             // Create a temporary directory
             let dir = tempdir().expect("Failed to create temp dir");
@@ -1145,9 +1184,9 @@ pub mod tests {
         use std::time::Instant;
 
 
-        const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
-        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
-        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
+        // const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
+        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
+        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf";
 
 
         fn generate_test_file() -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
@@ -1180,9 +1219,9 @@ pub mod tests {
         #[test]
         #[serial]
         pub fn test_rqprocessor() -> Result<(), Box<dyn std::error::Error>> {
-                    
+            let test_db_path = get_test_db_path();
             let start_time = Instant::now(); // Mark the start time
-            initialize_database(TEST_DB_PATH).unwrap();
+            initialize_database(&test_db_path).unwrap();
 
             setup();
             // Read the configuration
@@ -1197,13 +1236,13 @@ pub mod tests {
                 generate_test_file()?
             };
 
-            log::info!("Opening TEST_DB_PATH at path: {}", TEST_DB_PATH); 
+            log::info!("Opening TEST_DB_PATH at path: {}", &test_db_path); 
             // Initialize database
-            let conn = RaptorQProcessor::initialize_db(TEST_DB_PATH)?;
+            let conn = RaptorQProcessor::initialize_db(&test_db_path)?;
 
             log::info!("Creating RaptorQProcessor now..."); 
             // Create processor
-            let processor: RaptorQProcessor = RaptorQProcessor::new(TEST_DB_PATH).unwrap();                        
+            let processor: RaptorQProcessor = RaptorQProcessor::new(&test_db_path).unwrap();                        
             log::info!("RaptorQProcessor created.");
 
             // Compute original file hash
@@ -1306,7 +1345,7 @@ pub mod tests {
             if !Path::new(STATIC_TEST_FILE).exists() {
                 fs::remove_file(input_test_file)?;
             }
-            fs::remove_file(TEST_DB_PATH)?;
+            remove_db_files(&test_db_path)?;
             log::info!("Clean up complete!");
             let elapsed_time = start_time.elapsed();  // Calculate the elapsed time
             log::info!("End-to-End Test total execution time: {:?}", elapsed_time);
