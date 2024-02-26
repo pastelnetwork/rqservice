@@ -9,6 +9,7 @@ import os
 import sqlite3
 import random
 import base58
+import subprocess
 
 logging.basicConfig(level=logging.INFO)
 
@@ -107,14 +108,32 @@ def decode(encoder_parameters, path):
     except Exception as e:
         logging.error(f"Error in decode: {e}\n{traceback.format_exc()}")
 
+def find_testnet3_directory():
+    try:
+        # Define the command to be executed
+        command = "find ~/ -type d -name 'testnet3' 2>/dev/null"
+        # Execute the command
+        result = subprocess.check_output(command, shell=True, text=True)
+        # Split the result by new lines to get a list of paths
+        paths = result.strip().split('\n')
+        # Return the first path if exists, else return None
+        return paths[0] if paths else None
+    except subprocess.CalledProcessError as e:
+        print(f"Error in find_testnet3_directory: {e}")
+        return None
+    
 if __name__ == "__main__":
     
     use_test_decode_only = 0
+    BASE_DIR = find_testnet3_directory()
+    DB_PATH = BASE_DIR + "/rq_symbols.sqlite"
+    OUTPUT_DIR = BASE_DIR + "/rqfiles"
+    
+    TEST_INPUT_FILE_DIR = "../test_files/"
+    RELATIVE_INPUT_FILE_PATH = TEST_INPUT_FILE_DIR + "The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf"
+    RELATIVE_INPUT_FILE_PATH = TEST_INPUT_FILE_DIR + "input_test_file_small.jpg"
 
-    DB_PATH = "/home/ubuntu/.pastel/testnet3/rq_symbols.sqlite" # Path to the SQLite database file
-    OUTPUT_DIR = "/home/ubuntu/.pastel/rqfiles" # Directory where you want to write the RQ symbol files
-    INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/input_test_file_small.jpg"
-    # INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/cp_detector.7z"
+    INPUT_FILE_PATH = os.path.abspath(RELATIVE_INPUT_FILE_PATH)
     
     if use_test_decode_only:
         os.remove(DB_PATH)
@@ -123,18 +142,23 @@ if __name__ == "__main__":
     channel = grpc.insecure_channel('localhost:50051')  # Change to your server's address and port
     stub = pb2_grpc.RaptorQStub(channel)
     
+    start_time = time.time()
     if not use_test_decode_only:
         logging.info(f"Testing with original file: {INPUT_FILE_PATH}")
         original_hash = compute_sha3_256(INPUT_FILE_PATH)
+        original_file_size_in_mb = os.path.getsize(INPUT_FILE_PATH) / (1024 * 1024)
+        print(f"Original file size: {original_file_size_in_mb} MB")
         metadata_response = encode_metadata(INPUT_FILE_PATH)
-        logging.info(f'Receieved metadata response: {metadata_response}')
+        end_time = time.time()
+        logging.info(f"Time taken to encode metadata: {end_time - start_time} seconds")
+        logging.info(f'Received metadata response: {metadata_response}')
         logging.info(f'Encoder parameters: {metadata_response.encoder_parameters}')
         with open('encoder_parameters', 'wb') as f:
             f.write(metadata_response.encoder_parameters)
         if metadata_response:
             logging.info("Now attempting to encode...")            
             encode_response = encode(INPUT_FILE_PATH)
-            logging.info(f'Receieved encode response: {encode_response}')
+            logging.info(f'Received encode response: {encode_response}')
             logging.info("Now sleeping for 1 second to allow the server to finish encoding...")
             time.sleep(1)
             logging.info("Now attempting to write RQ symbol files from the database...")
@@ -148,7 +172,6 @@ if __name__ == "__main__":
             logging.error("Encoding failed.")
     else:
         logging.info("Testing decode only...")
-        INPUT_FILE_PATH = "/home/ubuntu/rqservice/test_files/input_test_file_small.jpg"
         # get most recently created directory in OUTPUT_DIR:
         dirs = [os.path.join(OUTPUT_DIR, d) for d in os.listdir(OUTPUT_DIR)]
         logging.info(f"Found directories: {dirs}")

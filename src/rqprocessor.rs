@@ -26,7 +26,7 @@ lazy_static! {
 }
 
 const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 2; // Adjust as needed
-pub const NUM_WORKERS: usize = 1;
+pub const NUM_WORKERS: usize = 5;
 pub const ORIGINAL_FILE_LOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 pub static DB_PATH: &once_cell::sync::Lazy<String> = &crate::DB_PATH;
 pub static RQ_FILES_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_FILES_PATH;
@@ -123,7 +123,7 @@ impl RaptorQProcessor {
         let mut file = File::open(input)
             .map_err(|err| RqProcessorError::new_file_err("compute_original_file_hash", "Cannot open file", input, err.to_string()))?;
         let mut hasher = Sha3_256::new();
-        const CHUNK_SIZE: usize = 256 * 1024; // 256 KB
+        const CHUNK_SIZE: usize = 512 * 1024; // 512 KB
         let mut buffer = vec![0u8; CHUNK_SIZE]; // Buffer to read chunks of the file
         // Read file in chunks and update the hash
         loop {
@@ -166,9 +166,9 @@ impl RaptorQProcessor {
             };
         }
         set_pragma_if_different!("journal_mode", "WAL");
-        set_pragma_if_different!("wal_autocheckpoint", "100");
+        set_pragma_if_different!("wal_autocheckpoint", "2000");
         set_pragma_if_different!("synchronous", "NORMAL");
-        set_pragma_if_different!("cache_size", "-524288");
+        set_pragma_if_different!("cache_size", "-262144");
         set_pragma_if_different!("busy_timeout", "2000");
         log::debug!("Creating tables");
         conn.execute(
@@ -1146,7 +1146,7 @@ pub mod tests {
 
 
         const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
-        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file_small.jpg"; // Path to a real sample file
+        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
         // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/cp_detector.7z"; // Path to a real sample file
 
 
