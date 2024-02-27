@@ -26,9 +26,9 @@ lazy_static! {
     static ref WRITE_LOCK: Mutex<()> = Mutex::new(());
 }
 
-const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 2; // Adjust as needed
+const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 2; 
 pub const NUM_WORKERS: usize = 5;
-pub const ORIGINAL_FILE_LOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+pub const ORIGINAL_FILE_LOAD_CHUNK_SIZE: usize = 50 * 1024 * 1024;
 pub static DB_PATH: &once_cell::sync::Lazy<String> = &crate::DB_PATH;
 pub static RQ_FILES_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_FILES_PATH;
 pub static RQ_CONFIG_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_CONFIG_PATH;
@@ -50,20 +50,16 @@ fn remove_db_files(base_path: &str) -> std::io::Result<()> {
     let base_file_path = Path::new(base_path);
     let directory = base_file_path.parent().unwrap_or_else(|| Path::new(""));
 
-    // List of file extensions to remove, including the main database file without an extension
+    // Correctly append extensions after the `.sqlite` part
     let file_extensions = vec!["", "-shm", "-wal"];
 
-    for extension in file_extensions {
-        let file_name = format!(
-            "{}{}.sqlite",
-            base_file_path.file_stem().unwrap().to_str().unwrap(),
-            extension
-        );
-        let file_path = directory.join(file_name);
+    for extension in &file_extensions {
+        // This now correctly formats the file name with extensions after `.sqlite`
+        let file_name = format!("{}{}.sqlite", base_file_path.file_stem().unwrap().to_str().unwrap(), extension);
+        let file_path = directory.join(&file_name);
         // Attempt to remove the file, ignoring errors if the file does not exist
-        let _ = fs::remove_file(file_path);
+        let _ = fs::remove_file(&file_path);
     }
-
     Ok(())
 }
 
@@ -199,10 +195,10 @@ impl RaptorQProcessor {
             };
         }
         set_pragma_if_different!("journal_mode", "WAL");
-        set_pragma_if_different!("wal_autocheckpoint", "2500");
+        set_pragma_if_different!("wal_autocheckpoint", "1000");
         set_pragma_if_different!("synchronous", "NORMAL");
         set_pragma_if_different!("cache_size", "-524288");
-        set_pragma_if_different!("busy_timeout", "1200");
+        set_pragma_if_different!("busy_timeout", "1500");
         log::debug!("Creating tables");
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rq_symbols (
@@ -1183,12 +1179,6 @@ pub mod tests {
         use rand::prelude::SliceRandom;
         use std::time::Instant;
 
-
-        // const TEST_DB_PATH: &str = "/home/ubuntu/rqservice/test_files/test_rq_symbols.sqlite";
-        // const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/input_test_file.jpg"; // Path to a real sample file
-        const STATIC_TEST_FILE: &str = "/home/ubuntu/rqservice/test_files/The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf";
-
-
         fn generate_test_file() -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
             let file_name = "input_test_file.txt";
             let mut rng = rand::thread_rng();
@@ -1220,6 +1210,12 @@ pub mod tests {
         #[serial]
         pub fn test_rqprocessor() -> Result<(), Box<dyn std::error::Error>> {
             let test_db_path = get_test_db_path();
+            remove_db_files(&test_db_path)?;
+
+            let home_dir_path = get_unix_home_dir_path();
+            // let static_test_file_path = format!("{}/rqservice/test_files/input_test_file.jpg", home_dir_path); // Path to a real sample file
+            // let static_test_file_path = format!("{}/rqservice/test_files/The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf", home_dir_path); // Path to a real sample file
+            let static_test_file_path = format!("{}/rqservice/test_files/generated_images.zip", home_dir_path); // Path to a real sample file
             let start_time = Instant::now(); // Mark the start time
             initialize_database(&test_db_path).unwrap();
 
@@ -1229,9 +1225,9 @@ pub mod tests {
             let config = toml::from_str::<Config>(&fs::read_to_string(&**RQ_CONFIG_PATH)?)?;
 
             // Choose between using a static test file or generating a random test file
-            log::info!("Opening STATIC_TEST_FILE at path: {}", STATIC_TEST_FILE);
-            let (input_test_file, input_test_file_data) = if Path::new(STATIC_TEST_FILE).exists() {
-                (STATIC_TEST_FILE.to_string(), fs::read(STATIC_TEST_FILE)?)
+            log::info!("Opening STATIC_TEST_FILE at path: {}", &static_test_file_path);
+            let (input_test_file, input_test_file_data) = if Path::new(&static_test_file_path).exists() {
+                (static_test_file_path.to_string(), fs::read(&static_test_file_path)?)
             } else {
                 generate_test_file()?
             };
@@ -1312,7 +1308,7 @@ pub mod tests {
             let symbols_to_fetch = (required_size as f64 / symbol_size as f64).ceil() as usize;
             log::info!("Number of random decoding attempts to try: {}", attempts);
             log::info!("Number of symbols to fetch for decoding: {} (compared to total number of generated RQ symbol files of {})", symbols_to_fetch, metadata.source_symbols + metadata.repair_symbols);
-            log::info!("Now attempting to reconstruct original file {} {} times...", STATIC_TEST_FILE, attempts);
+            log::info!("Now attempting to reconstruct original file {} {} times...", &static_test_file_path, attempts);
             for attempt_number in 0..attempts {
                 log::info!("Attempt {}...", attempt_number);
                 // Prepare the statement to select symbol hashes
@@ -1342,7 +1338,7 @@ pub mod tests {
             log::info!("All attempts successful!");
             log::info!("Cleaning up...");
             // Clean up (optional)
-            if !Path::new(STATIC_TEST_FILE).exists() {
+            if !Path::new(&static_test_file_path).exists() {
                 fs::remove_file(input_test_file)?;
             }
             remove_db_files(&test_db_path)?;
