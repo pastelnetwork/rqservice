@@ -130,9 +130,9 @@ if __name__ == "__main__":
     OUTPUT_DIR = BASE_DIR + "/rqfiles"
     
     TEST_INPUT_FILE_DIR = "../test_files/"
-    RELATIVE_INPUT_FILE_PATH = TEST_INPUT_FILE_DIR + "The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf"
-    RELATIVE_INPUT_FILE_PATH = TEST_INPUT_FILE_DIR + "generated_images.zip"
-    # RELATIVE_INPUT_FILE_PATH = TEST_INPUT_FILE_DIR + "input_test_file_small.jpg"
+    RELATIVE_INPUT_FILE_PATH = TEST_INPUT_FILE_DIR + "input_test_file.jpg"
+    # RELATIVE_INPUT_FILE_PATH = TEST_INPUT_FILE_DIR + "The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf"
+    # RELATIVE_INPUT_FILE_PATH = TEST_INPUT_FILE_DIR + "generated_images.zip"
 
     INPUT_FILE_PATH = os.path.abspath(RELATIVE_INPUT_FILE_PATH)
     

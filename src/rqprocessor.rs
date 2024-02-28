@@ -121,7 +121,7 @@ fn get_current_timestamp() -> i64 {
 }
 
 enum WriteOperation {
-    OriginalFile((String, String, f64, u32, String, String, Vec<u8>)),
+    OriginalFile((String, String, f64, u32, String, String, Vec<String>, Vec<u8>)),
     Symbol((String, String, String, Vec<u8>, i64)),
     UpdateOriginalFileHash((String, String)),
     Terminate, // New termination signal
@@ -218,7 +218,8 @@ impl RaptorQProcessor {
                 files_number INT,
                 encoder_parameters BLOB,
                 block_hash TEXT,
-                pastel_id TEXT
+                pastel_id TEXT,
+                symbol_ids_json TEXT
             )",
             params![],
         )?;
@@ -287,11 +288,13 @@ impl RaptorQProcessor {
         Ok(())
     }
     
-    fn insert_original_file(tx: &rusqlite::Transaction, original_file_hash: &str, original_file_path: &str, original_file_size_in_mb: f64, files_number: u32, block_hash: &str, pastel_id: &str, encoder_parameters: &Vec<u8>) -> Result<(), rusqlite::Error> {
+    fn insert_original_file(tx: &rusqlite::Transaction, original_file_hash: &str, original_file_path: &str, original_file_size_in_mb: f64, files_number: u32, block_hash: &str, pastel_id: &str, names: Vec<String>, encoder_parameters: &Vec<u8>) -> Result<(), rusqlite::Error> {
         log::info!("Inserting metadata for original file with hash: {}", original_file_hash);
+        // Serialize `names` into a JSON string
+        let names_json = serde_json::to_string(&names).expect("Failed to serialize names");
         tx.execute(
-            "INSERT OR REPLACE INTO original_files (original_file_sha3_256_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![original_file_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters],
+            "INSERT OR REPLACE INTO original_files (original_file_sha3_256_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, symbol_ids_json, encoder_parameters) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![original_file_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, names_json, encoder_parameters],
         )?;
         log::info!("Inserted original file with hash: {}", original_file_hash);
         Ok(())
@@ -331,17 +334,19 @@ impl RaptorQProcessor {
         block_hash: &String,
         pastel_id: &String,
         enc_config: &Vec<u8>,
+        names: Vec<String>,
         file_size: f64,
         files_number: u32,
         tx_queue: &crossbeam::channel::Sender<WriteOperation>,
     ) -> Result<(), RqProcessorError> {
-        let original_file_metadata: (String, String, f64, u32, String, String, Vec<u8>) = (
+        let original_file_metadata: (String, String, f64, u32, String, String, Vec<String>, Vec<u8>) = (
             original_file_hash.clone(),
             path.clone(),
             file_size,
             files_number,
             block_hash.clone(),
             pastel_id.clone(),
+            names,
             enc_config.clone(),
         );
         tx_queue
@@ -385,7 +390,7 @@ impl RaptorQProcessor {
                         }
                     }
                 },
-                WriteOperation::OriginalFile((original_file_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters)) => {
+                WriteOperation::OriginalFile((original_file_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, names,encoder_parameters)) => {
                     let mut retries = 0;
                     loop {
                         log::info!("Attempting to acquire write lock now...");
@@ -394,7 +399,7 @@ impl RaptorQProcessor {
                         })?;
                         match conn.transaction() {
                             Ok(tx) => {
-                                RaptorQProcessor::insert_original_file(&tx, &original_file_hash, &original_file_path, original_file_size_in_mb, files_number, &block_hash, &pastel_id, &encoder_parameters)?;
+                                RaptorQProcessor::insert_original_file(&tx, &original_file_hash, &original_file_path, original_file_size_in_mb, files_number, &block_hash, &pastel_id, names, &encoder_parameters)?;
                                 tx.commit()?;
                                 break;
                             },
@@ -590,6 +595,7 @@ impl RaptorQProcessor {
             &block_hash,
             &pastel_id,
             &enc_config,
+            names,
             input.metadata().ok().map_or(0.0, |m| m.len() as f64 / 1_000_000.0),
             total_repair_symbols,
             &tx_queue,
@@ -741,7 +747,8 @@ impl RaptorQProcessor {
                     let restored_file_size_in_mb = restored_file.metadata()?.len() as f64 / 1_000_000.0; 
                     let block_hash = "NA".to_string();
                     let pastel_id = "NA".to_string();
-                    let write_op_insert_original = WriteOperation::OriginalFile((restored_file_hash, restored_file_path.to_string_lossy().into_owned(), restored_file_size_in_mb, files_number, block_hash, pastel_id, encoder_parameters.clone()));
+                    let names = vec!["NA".to_string()];
+                    let write_op_insert_original = WriteOperation::OriginalFile((restored_file_hash, restored_file_path.to_string_lossy().into_owned(), restored_file_size_in_mb, files_number, block_hash, pastel_id, names, encoder_parameters.clone()));
                     tx_queue.send(write_op_insert_original)?;
                 }
                 for _ in 0..NUM_WORKERS { tx_queue.send(WriteOperation::Terminate).unwrap(); }
