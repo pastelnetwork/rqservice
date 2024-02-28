@@ -601,6 +601,7 @@ impl RaptorQProcessor {
         let original_file_hash = self.compute_original_file_hash(&input)?;
         let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get()
             .map_err(|err| RqProcessorError::new("create_metadata", "Failed to get connection from pool", err.to_string()))?;
+        self.db_maintenance_func(&conn)?;
         if RaptorQProcessor::original_file_exists(&*conn, &original_file_hash)? {
             log::info!("Original file already exists in the database: {}! Skipping it...", original_file_hash);
             return Err(RqProcessorError::new("create_metadata", "Original file already exists in the database", original_file_hash));
@@ -732,6 +733,7 @@ impl RaptorQProcessor {
             .to_string();
         log::info!("Task ID: {}", task_id);
         let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get().expect("Failed to get connection from pool.");
+        self.db_maintenance_func(&conn)?;
         let sql_statement = format!("SELECT rq_symbol_file_data FROM rq_symbols WHERE task_id = '{}'", task_id);
         let mut stmt = conn.prepare(&sql_statement)?;
         let mut symbol_data_vec = Vec::new();
@@ -809,6 +811,7 @@ impl RaptorQProcessor {
         let config = ObjectTransmissionInformation::deserialize(&cfg);
         let mut dec = Decoder::new(config);
         let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get().expect("Failed to get connection from pool.");
+        self.db_maintenance_func(&conn)?;
         let sql_statement = format!("SELECT rq_symbol_file_data FROM rq_symbols WHERE original_file_sha3_256_hash = '{}'", original_file_hash);
         let mut stmt = conn.prepare(&sql_statement)?;
         let mut symbol_data_vec = Vec::new();
