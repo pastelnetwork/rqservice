@@ -480,6 +480,32 @@ impl RaptorQProcessor {
         Ok(count > 0)
     }
 
+    pub fn fetch_metadata_from_db(
+        &self,
+        conn: &Connection,
+        original_file_hash: &str,
+    ) -> Result<(String, f64, u32, Vec<u8>, String, String, Vec<String>), rusqlite::Error> {
+        conn.query_row(
+            "SELECT original_file_path, original_file_size_in_mb, files_number, encoder_parameters, block_hash, pastel_id, symbol_ids_json FROM original_files WHERE original_file_sha3_256_hash = ?1",
+            params![original_file_hash],
+            |row| {
+                let original_file_path: String = row.get(0)?;
+                let original_file_size_in_mb: f64 = row.get(1)?;
+                let files_number: u32 = row.get(2)?;
+                let encoder_parameters: Vec<u8> = row.get(3)?;
+                let block_hash: String = row.get(4)?;
+                let pastel_id: String = row.get(5)?;
+                let symbol_ids_json: String = row.get(6)?;
+    
+                // Assuming symbol_ids_json is stored as a JSON string of an array of strings
+                let symbol_ids: Vec<String> = serde_json::from_str(&symbol_ids_json)
+                    .map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
+    
+                Ok((original_file_path, original_file_size_in_mb, files_number, encoder_parameters, block_hash, pastel_id, symbol_ids))
+            },
+        )
+    }
+
     fn check_if_rq_symbol_files_are_already_in_db(
         pool: &r2d2::Pool<SqliteConnectionManager>,
         path_to_rq_symbol_files_for_file: &str,

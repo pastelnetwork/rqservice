@@ -45,39 +45,69 @@ impl RaptorQ for RaptorQService {
 
     async fn encode_meta_data(&self, request: Request<EncodeMetaDataRequest>) -> Result<Response<EncodeMetaDataReply>, Status> {
         log::info!("Received 'encode_meta_data' request: {:?}", request);
-
-        // Create the RaptorQProcessor with the specified DB path
+    
         log::debug!("Creating RaptorQProcessor...");
-        let processor_result = rqprocessor::RaptorQProcessor::new(DB_PATH);
-
-        let processor = match processor_result {
+        let processor = match rqprocessor::RaptorQProcessor::new(DB_PATH) {
             Ok(processor) => processor,
             Err(err) => {
                 log::error!("Failed to create processor: {:?}", err);
                 return Err(Status::internal("Failed to create processor"));
             }
         };
-        let req = request.into_inner();    
-
-        let pool = &self.pool; // Make sure to access the pool in your specific context
     
-        log::debug!("Calling 'create_metadata'...");
-        match processor.create_metadata(&req.path, &req.block_hash, &req.pastel_id, pool) {
-                                    Ok((meta, path)) => {
-                log::debug!("Successfully processed metadata.");
-                // Build the reply using the meta and hash
+        let req = request.into_inner();
+    
+        // Get a DB connection from the pool for the `fetch_metadata_from_db` call
+        let conn = match self.pool.get() {
+            Ok(conn) => conn,
+            Err(err) => {
+                log::error!("Failed to get DB connection: {:?}", err);
+                return Err(Status::internal("Failed to get DB connection"));
+            }
+        };
+    
+        // Compute the hash of the file at the given path
+        log::debug!("Computing hash for the file at path: {}", &req.path);
+        let file_path = std::path::Path::new(&req.path);
+        let original_file_hash = match processor.compute_original_file_hash(file_path) {
+            Ok(hash) => hash,
+            Err(e) => {
+                log::error!("Failed to compute hash for file at path {}: {:?}", &req.path, e);
+                return Err(Status::internal("Failed to compute file hash"));
+            }
+        };
+    
+        // Fetch existing metadata using the computed hash
+        log::debug!("Attempting to fetch existing metadata...");
+        match processor.fetch_metadata_from_db(&conn, &original_file_hash) {
+            Ok((original_file_path, _original_file_size_in_mb, files_number, encoder_parameters, _block_hash, _pastel_id, _symbol_ids)) => {
+                log::debug!("Found existing metadata, encoding...");
                 let reply = rq::EncodeMetaDataReply {
-                    encoder_parameters: meta.encoder_parameters,
-                    symbols_count: meta.source_symbols + meta.repair_symbols,
-                    path
+                    encoder_parameters: encoder_parameters,
+                    symbols_count: files_number, // Assuming 'files_number' represents total symbols
+                    path: original_file_path,
                 };
-    
                 Ok(Response::new(reply))
             },
-            Err(e) => {
-                log::error!("Error while processing metadata: {:?}", e);
-                let error_message = format!("Error while processing metadata: {}", e.get_message()); // Use the accessor method
-                Err(Status::internal(error_message)) // Include the error message in the Status object
+            Err(_e) => {
+                log::debug!("No existing metadata found or error occurred, attempting to create new metadata...");
+                // Correctly passing all required arguments to `create_metadata`
+                match processor.create_metadata(&req.path, &req.block_hash, &req.pastel_id, &self.pool) {
+                    Ok((meta, path)) => {
+                        log::debug!("Successfully processed new metadata.");
+                        let reply = rq::EncodeMetaDataReply {
+                            encoder_parameters: meta.encoder_parameters,
+                            symbols_count: meta.source_symbols + meta.repair_symbols,
+                            path,
+                        };
+                        Ok(Response::new(reply))
+                    },
+                    Err(e) => {
+                        log::error!("Error while processing metadata: {:?}", e);
+                        let error_message = format!("Error while processing metadata: {}", e.to_string());
+                        Err(Status::internal(error_message))
+                    }
+                }
             }
         }
     }
