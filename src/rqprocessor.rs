@@ -26,7 +26,7 @@ lazy_static! {
 }
 
 const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 2; 
-pub const NUM_WORKERS: usize = 1;
+pub const NUM_WORKERS: usize = 6;
 pub const ORIGINAL_FILE_LOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
 pub static DB_PATH: &once_cell::sync::Lazy<String> = &crate::DB_PATH;
 pub static RQ_FILES_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_FILES_PATH;
@@ -615,23 +615,17 @@ impl RaptorQProcessor {
             .map_err(|err| RqProcessorError::new("create_metadata", "Failed to get connection from pool", err.to_string()))?;
         self.db_maintenance_func(&conn)?;
         if RaptorQProcessor::original_file_exists(&*conn, &original_file_hash)? {
-            log::info!("Original file already exists in the database: {}! Skipping it...", original_file_hash);
             return Err(RqProcessorError::new("create_metadata", "Original file already exists in the database", original_file_hash));
         }
         let enc_config = enc.get_config().serialize().to_vec();
-        log::info!("Encoder config used in `create_metadata`: {:?}", enc_config);
-
-        // Use the new streaming method to handle encoded packets
-        let packet_stream = enc.get_encoded_packets_streaming(total_repair_symbols); // Assuming this method now exists
-        let mut names = Vec::new();
-        packet_stream.for_each(|packet| {
-            let serialized_packet = packet.serialize();
-            names.push(RaptorQProcessor::symbols_id(&serialized_packet));
-        });
+    
+        let packet_stream = enc.get_encoded_packets_streaming(total_repair_symbols);
+        let names: Vec<String> = packet_stream.map(|packet| {
+            RaptorQProcessor::symbols_id(&packet.serialize())
+        }).collect();
         let names_len = names.len() as u32;
-
-        // Proceed with the rest of the method as before
-        let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
+    
+        let (tx_queue, _rx_queue) = crossbeam::channel::unbounded();
         RaptorQProcessor::insert_original_file_metadata(
             &original_file_hash,
             path,
@@ -643,15 +637,9 @@ impl RaptorQProcessor {
             total_repair_symbols,
             &tx_queue,
         )?;
-
-        let pool_clone = pool.clone();
-        std::thread::spawn(move || {
-            let conn = pool_clone.get().expect("Failed to get connection from pool.");
-            RaptorQProcessor::insert_worker_func(rx_queue, conn).expect("Insert worker failed");
-        });
-
+    
         tx_queue.send(WriteOperation::Terminate).unwrap();
-
+    
         Ok((
             EncoderMetaData {
                 encoder_parameters: enc_config,
@@ -1276,8 +1264,8 @@ pub mod tests {
             remove_db_files(&test_db_path)?;
 
             let home_dir_path = get_unix_home_dir_path();
-            let static_test_file_path = format!("{}/rqservice/test_files/input_test_file.jpg", home_dir_path); // Path to a real sample file
-            // let static_test_file_path = format!("{}/rqservice/test_files/The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf", home_dir_path); // Path to a real sample file
+            // let static_test_file_path = format!("{}/rqservice/test_files/input_test_file.jpg", home_dir_path); // Path to a real sample file
+            let static_test_file_path = format!("{}/rqservice/test_files/The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf", home_dir_path); // Path to a real sample file
             // let static_test_file_path = format!("{}/rqservice/test_files/generated_images.zip", home_dir_path); // Path to a real sample file
             let start_time = Instant::now(); // Mark the start time
             initialize_database(&test_db_path).unwrap();
