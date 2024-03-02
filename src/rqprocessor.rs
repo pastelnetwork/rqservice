@@ -73,6 +73,22 @@ struct RqConfig {
     redundancy_factor: u8,
 }
 
+// Add to Encoder:
+
+// pub fn get_encoded_packets_streaming(
+//     &self,
+//     repair_packets_per_block: u32,
+// ) -> Box<dyn Iterator<Item=EncodingPacket> + '_> {
+//     let iterators = self.blocks.iter().flat_map(move |encoder| {
+//         let source_packets = encoder.source_packets().into_iter();
+//         let repair_packets = encoder.repair_packets(0, repair_packets_per_block).into_iter();
+//         source_packets.chain(repair_packets)
+//     });
+
+//     Box::new(iterators)
+// }
+
+
 fn read_config() -> Result<RqConfig, Box<dyn std::error::Error>> {
     let path_str = &**RQ_CONFIG_PATH; // Dereferencing to get the underlying String
     let contents = fs::read_to_string(path_str)?; // Reading the file
