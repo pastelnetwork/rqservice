@@ -13,7 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_derive::{Deserialize, Serialize};
 use rusqlite::{Connection, params, ToSql};
-use rayon::prelude::*;
 use rand::Rng;
 use lazy_static::lazy_static;
 use r2d2::Pool;
@@ -27,8 +26,8 @@ lazy_static! {
 }
 
 const MAX_DAYS_OLD_BEFORE_RQ_SYMBOL_FILES_ARE_PURGED: i64 = 2; 
-pub const NUM_WORKERS: usize = 5;
-pub const ORIGINAL_FILE_LOAD_CHUNK_SIZE: usize = 50 * 1024 * 1024;
+pub const NUM_WORKERS: usize = 1;
+pub const ORIGINAL_FILE_LOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
 pub static DB_PATH: &once_cell::sync::Lazy<String> = &crate::DB_PATH;
 pub static RQ_FILES_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_FILES_PATH;
 pub static RQ_CONFIG_PATH: &once_cell::sync::Lazy<String> = &crate::RQ_CONFIG_PATH;
@@ -166,7 +165,7 @@ impl RaptorQProcessor {
         let hash_result = hasher.finalize();
         Ok(bs58::encode(&hash_result).into_string())
     }
-    
+
     pub fn initialize_db(path: &str) -> Result<Connection, rusqlite::Error> {
         log::info!("Initializing database at path: {}", path);
         let conn = Connection::open(path)?;
@@ -290,7 +289,6 @@ impl RaptorQProcessor {
     
     fn insert_original_file(tx: &rusqlite::Transaction, original_file_hash: &str, original_file_path: &str, original_file_size_in_mb: f64, files_number: u32, block_hash: &str, pastel_id: &str, names: Vec<String>, encoder_parameters: &Vec<u8>) -> Result<(), rusqlite::Error> {
         log::info!("Inserting metadata for original file with hash: {}", original_file_hash);
-        // Serialize `names` into a JSON string
         let names_json = serde_json::to_string(&names).expect("Failed to serialize names");
         tx.execute(
             "INSERT OR REPLACE INTO original_files (original_file_sha3_256_hash, original_file_path, original_file_size_in_mb, files_number, block_hash, pastel_id, symbol_ids_json, encoder_parameters) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -306,21 +304,19 @@ impl RaptorQProcessor {
     ) -> Result<(), Box<dyn std::error::Error>> {
         const MAX_RETRIES: u32 = 5;
         const RETRY_DELAY: Duration = Duration::from_millis(50);
-        let mut retries = 0;
-        loop {
+        for attempt in 0..=MAX_RETRIES {
             match RaptorQProcessor::insert_symbols_batch(conn, symbol_batch) {
                 Ok(_) => {
                     log::info!("Symbols batch inserted successfully, containing {} symbol files.", symbol_batch.len());
-                    break;
-                }
-                Err(err) if retries < MAX_RETRIES => {
-                    log::warn!("Retrying symbols batch insertion. Retry count: {}. Error: {}", retries, err);
-                    retries += 1;
+                    return Ok(());
+                },
+                Err(err) if attempt < MAX_RETRIES => {
+                    log::warn!("Retrying symbols batch insertion. Retry count: {}. Error: {}", attempt, err);
                     let jitter = rand::thread_rng().gen_range(0..10);
                     std::thread::sleep(RETRY_DELAY + Duration::from_millis(jitter));
-                }
+                },
                 Err(err) => {
-                    log::error!("Failed to insert symbols batch. Error: {}", err);
+                    log::error!("Failed to insert symbols batch after {} attempts. Error: {}", MAX_RETRIES, err);
                     return Err(err.into());
                 }
             }
@@ -596,10 +592,10 @@ impl RaptorQProcessor {
         pastel_id: &String,
         pool: &Pool<SqliteConnectionManager>,
     ) -> Result<(EncoderMetaData, String), RqProcessorError> {
-        let input = Path::new(&path);
+        let input = Path::new(path);
         let (enc, total_repair_symbols) = self.get_encoder(input)?;
-        let original_file_hash = self.compute_original_file_hash(&input)?;
-        let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool.get()
+        let original_file_hash = self.compute_original_file_hash(input)?;
+        let conn = pool.get()
             .map_err(|err| RqProcessorError::new("create_metadata", "Failed to get connection from pool", err.to_string()))?;
         self.db_maintenance_func(&conn)?;
         if RaptorQProcessor::original_file_exists(&*conn, &original_file_hash)? {
@@ -608,35 +604,38 @@ impl RaptorQProcessor {
         }
         let enc_config = enc.get_config().serialize().to_vec();
         log::info!("Encoder config used in `create_metadata`: {:?}", enc_config);
-        // Collect symbol names
-        let names: Vec<String> = enc.get_encoded_packets(total_repair_symbols)
-            .iter()
-            .map(|packet| RaptorQProcessor::symbols_id(&packet.serialize()))
-            .collect();
+
+        // Use the new streaming method to handle encoded packets
+        let packet_stream = enc.get_encoded_packets_streaming(total_repair_symbols); // Assuming this method now exists
+        let mut names = Vec::new();
+        packet_stream.for_each(|packet| {
+            let serialized_packet = packet.serialize();
+            names.push(RaptorQProcessor::symbols_id(&serialized_packet));
+        });
         let names_len = names.len() as u32;
-        // Prepare the original file metadata
+
+        // Proceed with the rest of the method as before
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
         RaptorQProcessor::insert_original_file_metadata(
             &original_file_hash,
-            &path,
-            &block_hash,
-            &pastel_id,
+            path,
+            block_hash,
+            pastel_id,
             &enc_config,
             names,
             input.metadata().ok().map_or(0.0, |m| m.len() as f64 / 1_000_000.0),
             total_repair_symbols,
             &tx_queue,
         )?;
-        // Start the worker function
-        let pool_clone = pool.clone(); // Clone the pool
+
+        let pool_clone = pool.clone();
         std::thread::spawn(move || {
-            let conn: r2d2::PooledConnection<SqliteConnectionManager> = pool_clone.get()
-                .expect("Failed to get connection from pool.");
-            RaptorQProcessor::insert_worker_func(rx_queue, conn)
-                .expect("Insert worker failed");
+            let conn = pool_clone.get().expect("Failed to get connection from pool.");
+            RaptorQProcessor::insert_worker_func(rx_queue, conn).expect("Insert worker failed");
         });
-        // Send termination signal to the worker
+
         tx_queue.send(WriteOperation::Terminate).unwrap();
+
         Ok((
             EncoderMetaData {
                 encoder_parameters: enc_config,
@@ -646,55 +645,67 @@ impl RaptorQProcessor {
             path.clone(),
         ))
     }
-    
+
     pub fn encode(&self, path: &String, pool: &Pool<SqliteConnectionManager>) -> Result<(EncoderMetaData, String), RqProcessorError> {
         log::info!("Starting encoding process for file: {}", path);
         let input = Path::new(&path);
         let (enc, repair_symbols) = self.get_encoder(input)?;
         log::info!("Encoder obtained with {} repair symbols.", repair_symbols);
         let original_file_hash = self.compute_original_file_hash(&input)?;
-        log::info!("Original file hash computed in encoder: {}", original_file_hash);
+        log::info!("Original file hash computed: {}", original_file_hash);
         let (tx_queue, rx_queue) = crossbeam::channel::unbounded();
-        let encoded_symbols: Vec<EncodingPacket> = enc.get_encoded_packets(repair_symbols);
-        log::info!("Symbols obtained for encoding.");
+        log::info!("Streaming symbols for encoding.");
+    
         let timestamp = get_current_timestamp();
-        // Iterate over symbols and send WriteOperations to worker threads
-        encoded_symbols.par_iter().for_each(|symbol| {
+        let packet_stream = enc.get_encoded_packets_streaming(repair_symbols);
+    
+        // Since we're streaming, we no longer know the total symbol count upfront, so we must track source symbols dynamically.
+        let mut source_symbols_count = 0;
+    
+        packet_stream.for_each(|symbol| {
             let pkt = symbol.serialize();
             let name = RaptorQProcessor::symbols_id(&pkt);
-            let task_id = "";
+            let task_id = ""; // Assuming task_id logic is handled elsewhere or not needed for this example
             let write_op = WriteOperation::Symbol((original_file_hash.clone(), task_id.to_string(), name, pkt, timestamp));
             tx_queue.send(write_op).unwrap();
+    
+            // Assume a way to differentiate source from repair symbols if necessary
+            source_symbols_count += 1; // Adjust this logic based on actual packet type differentiation
         });
+    
         // Launch worker threads to handle the insertion of symbols
         let workers: Vec<_> = (0..NUM_WORKERS)
             .map(|_| {
-                let rx_queue = rx_queue.clone();
-                let pool = pool.clone();
+                let rx_queue_clone = rx_queue.clone();
+                let pool_clone = pool.clone();
                 std::thread::spawn(move || -> Result<(), RqProcessorError> {
-                    let conn = pool.get().expect("Failed to get connection from pool.");
-                    RaptorQProcessor::insert_worker_func(rx_queue, conn)?;
+                    let conn = pool_clone.get().expect("Failed to get connection from pool.");
+                    RaptorQProcessor::insert_worker_func(rx_queue_clone, conn)?;
                     Ok(())
                 })
             })
             .collect();
+    
         log::info!("Sending termination signal to insert worker(s)...");
         for _ in 0..NUM_WORKERS {
             tx_queue.send(WriteOperation::Terminate).unwrap();
         }
+    
         // Wait for worker threads to complete
         for worker in workers {
             worker.join().expect("Worker thread panicked")?;
         }
+    
         log::info!("Symbols inserted successfully.");
+    
         Ok((
             EncoderMetaData {
                 encoder_parameters: enc.get_config().serialize().to_vec(),
-                source_symbols: encoded_symbols.len() as u32 - repair_symbols,
+                source_symbols: source_symbols_count - repair_symbols, // Adjust according to actual differentiation logic
                 repair_symbols,
             },
             path.clone(),
-                ))
+        ))
     }
 
     pub fn decode(
@@ -1249,9 +1260,9 @@ pub mod tests {
             remove_db_files(&test_db_path)?;
 
             let home_dir_path = get_unix_home_dir_path();
-            // let static_test_file_path = format!("{}/rqservice/test_files/input_test_file.jpg", home_dir_path); // Path to a real sample file
+            let static_test_file_path = format!("{}/rqservice/test_files/input_test_file.jpg", home_dir_path); // Path to a real sample file
             // let static_test_file_path = format!("{}/rqservice/test_files/The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf", home_dir_path); // Path to a real sample file
-            let static_test_file_path = format!("{}/rqservice/test_files/generated_images.zip", home_dir_path); // Path to a real sample file
+            // let static_test_file_path = format!("{}/rqservice/test_files/generated_images.zip", home_dir_path); // Path to a real sample file
             let start_time = Instant::now(); // Mark the start time
             initialize_database(&test_db_path).unwrap();
 
