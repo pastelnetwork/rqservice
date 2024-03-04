@@ -1249,9 +1249,9 @@ pub mod tests {
             remove_db_files(&test_db_path)?;
 
             let home_dir_path = get_unix_home_dir_path();
-            // let static_test_file_path = format!("{}/rqservice/test_files/input_test_file.jpg", home_dir_path); // Path to a real sample file
+            let static_test_file_path = format!("{}/rqservice/test_files/input_test_file.jpg", home_dir_path); // Path to a real sample file
             // let static_test_file_path = format!("{}/rqservice/test_files/The_Royal_Navy___A_History_[vol. 1]_(Clowes).pdf", home_dir_path); // Path to a real sample file
-            let static_test_file_path = format!("{}/rqservice/test_files/generated_images.zip", home_dir_path); // Path to a real sample file
+            // let static_test_file_path = format!("{}/rqservice/test_files/generated_images.zip", home_dir_path); // Path to a real sample file
             let start_time = Instant::now(); // Mark the start time
             initialize_database(&test_db_path).unwrap();
 
